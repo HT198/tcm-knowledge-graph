@@ -9,13 +9,13 @@ st.set_page_config(page_title="中医药知识图谱", layout="wide")
 st.title("🌿 中医药知识图谱查询系统")
 
 # --------------------------
-# 连接 Neo4j Aura（用Streamlit Secrets）
+# 硬编码连接信息（本地实测可用）
 # --------------------------
 @st.cache_resource
 def init_driver():
-    uri = st.secrets["neo4j_uri"]
-    user = st.secrets["neo4j_user"]
-    pwd = st.secrets["neo4j_password"]
+    uri = "neo4j+s://cb5cc04e.databases.neo4j.io"
+    user = "cb5cc04e"
+    pwd = "uzjqMbskUGdIObBV0uRRs6AoTO8gpmetKkHyhd3vuhs"
     return GraphDatabase.driver(uri, auth=(user, pwd))
 
 driver = init_driver()
@@ -25,7 +25,7 @@ driver = init_driver()
 # --------------------------
 def get_entity_info(entity_name):
     with driver.session() as session:
-        # 实体基本信息（适配你当前的标签：nodes.csv）
+        # 实体基本信息（适配标签 nodes.csv）
         res = session.run("""
             MATCH (n:`nodes.csv` {id: $name}) RETURN n
         """, name=entity_name)
@@ -33,8 +33,8 @@ def get_entity_info(entity_name):
         if not record:
             return None, None
         node = record["n"]
-        # 提取属性
-        props = {k: v for k, v in node.items() if k not in ["id", "label"]}
+        # 提取全部属性
+        props = dict(node)
         # 提取关系
         relations = session.run("""
             MATCH (n:`nodes.csv` {id: $name})-[r]-(m)
@@ -67,10 +67,8 @@ if menu == "实体查询":
         if props is None:
             st.warning("未找到该实体，请检查名称是否正确")
         else:
-            # 显示属性
             st.markdown("### 基本属性")
             st.dataframe(pd.DataFrame(list(props.items()), columns=["属性", "值"]), use_container_width=True)
-            # 显示关系
             if relations:
                 st.markdown("### 关联关系")
                 st.dataframe(pd.DataFrame(relations), use_container_width=True)
