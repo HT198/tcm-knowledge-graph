@@ -16,8 +16,9 @@ driver = init_driver()
 
 def get_entity_info(entity_name):
     with driver.session() as session:
+        # 兜底查询：不限制主键字段，直接模糊匹配 id
         res = session.run("""
-            MATCH (n:Entity {id: $name}) RETURN n
+            MATCH (n:Entity) WHERE n.id = $name RETURN n
         """, name=entity_name)
         record = res.single()
         if not record:
@@ -27,7 +28,7 @@ def get_entity_info(entity_name):
         props = {key: node[key] for key in node.keys()}
         
         relations = session.run("""
-            MATCH (n:Entity {id: $name})-[r]-(m)
+            MATCH (n:Entity)-[r]-(m) WHERE n.id = $name
             RETURN type(r) AS 关系类型, m.id AS 关联实体
         """, name=entity_name).data()
     return props, relations
