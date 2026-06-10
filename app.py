@@ -2,15 +2,9 @@ import streamlit as st
 from neo4j import GraphDatabase
 import pandas as pd
 
-# --------------------------
-# 配置页面
-# --------------------------
 st.set_page_config(page_title="中医药知识图谱", layout="wide")
 st.title("🌿 中医药知识图谱查询系统")
 
-# --------------------------
-# 连接 Neo4j Aura（硬编码版本）
-# --------------------------
 @st.cache_resource
 def init_driver():
     uri = "neo4j+s://cb5cc04e.databases.neo4j.io"
@@ -20,21 +14,18 @@ def init_driver():
 
 driver = init_driver()
 
-# --------------------------
-# 核心查询函数
-# --------------------------
 def get_entity_info(entity_name):
     with driver.session() as session:
-        # 修正1：标签改为 Entity
         res = session.run("""
             MATCH (n:Entity {id: $name}) RETURN n
         """, name=entity_name)
         record = res.single()
         if not record:
             return None, None
+        
         node = record["n"]
-        props = dict(node)
-        # 修正2：关联关系查询也改为 Entity 标签
+        props = {key: node[key] for key in node.keys()}
+        
         relations = session.run("""
             MATCH (n:Entity {id: $name})-[r]-(m)
             RETURN type(r) AS 关系类型, m.id AS 关联实体
@@ -43,7 +34,6 @@ def get_entity_info(entity_name):
 
 def query_herbs_for_disease(disease_name):
     with driver.session() as session:
-        # 修正3：病症查询也改为 Entity 标签
         res = session.run("""
             MATCH (m:Entity)-[r]->(d:Entity {id: $disease})
             WHERE type(r) IN ['治疗', '含有成分']
@@ -51,17 +41,11 @@ def query_herbs_for_disease(disease_name):
         """, disease=disease_name)
     return pd.DataFrame(res.data())
 
-# --------------------------
-# 侧边栏菜单
-# --------------------------
 menu = st.sidebar.selectbox("功能菜单", ["实体查询", "病症找药"])
 
-# --------------------------
-# 页面1：实体查询
-# --------------------------
 if menu == "实体查询":
     st.subheader("📌 药材/实体查询")
-    entity_name = st.text_input("输入实体名称（如：穿山甲对照药材）", "穿山甲对照药材")
+    entity_name = st.text_input("输入实体名称（如：丁香）", "丁香")
     if st.button("查询"):
         props, relations = get_entity_info(entity_name)
         if props is None:
@@ -73,11 +57,8 @@ if menu == "实体查询":
                 st.markdown("### 关联关系")
                 st.dataframe(pd.DataFrame(relations), use_container_width=True)
             else:
-                st.info("该实体暂无关联关系（数据库 Relationships: 0）")
+                st.info("该实体暂无关联关系")
 
-# --------------------------
-# 页面2：病症找药
-# --------------------------
 elif menu == "病症找药":
     st.subheader("💊 根据病症查询推荐药材")
     disease = st.text_input("输入病症名称（如：脾胃虚寒）", "脾胃虚寒")
