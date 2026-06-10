@@ -13,10 +13,10 @@ st.title("🌿 中医药知识图谱查询系统")
 # --------------------------
 @st.cache_resource
 def init_driver():
-    uri = st.secrets["neo4j+s://cb5cc04e.databases.neo4j.io"]
-    user = st.secrets["cb5cc04e"]
-    password = st.secrets["uzjqMbskUGdIObBV0uRRs6AoTO8gpmetKkHyhd3vuhs"]
-    return GraphDatabase.driver(uri, auth=(user, password))
+    uri = st.secrets["neo4j_uri"]
+    user = st.secrets["neo4j_user"]
+    pwd = st.secrets["neo4j_password"]
+    return GraphDatabase.driver(uri, auth=(user, pwd))
 
 driver = init_driver()
 
