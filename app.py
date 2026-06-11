@@ -73,15 +73,6 @@ def call_tongyi_api(api_key, graph_context, user_question):
 
 请用通俗易懂的中文回答，分点说明更佳：
 """
-
-【知识图谱检索结果】：
-{graph_context}
-
-【用户问题】：
-{user_question}
-
-请用通俗易懂的中文回答，分点说明更佳：
-"""
     payload = {
         "model": "qwen-turbo",
         "input": {"messages": [{"role": "user", "content": prompt}]},
