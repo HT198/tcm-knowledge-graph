@@ -89,6 +89,9 @@ def call_tongyi_api(api_key, graph_context, user_question):
 
 # ---------------------- 5. 图谱上下文检索（给AI用） ----------------------
 def search_graph_context(question):
+    stop_words = ["用什么", "什么药", "检测", "治疗", "含有", "属于"]
+    for word in stop_words:
+        question = question.replace(word, "")
     context = []
     with driver.session() as session:
         # ---------------------- 1. 从问题中提取关键词（简单分词） ----------------------
