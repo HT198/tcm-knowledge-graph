@@ -2,6 +2,9 @@ import streamlit as st
 from neo4j import GraphDatabase
 import pandas as pd
 import requests
+import time
+import hashlib
+import hmac
 
 # 页面基础配置
 st.set_page_config(page_title="中医药知识图谱+AI问答", layout="wide")
@@ -29,7 +32,7 @@ def get_entity_info(entity_name):
         props = {}
         for key, val in dict(node).items():
             if val is not None and val != "":
-                props[key] = val
+                props[key]
 
         res_rel = session.run("""
             MATCH (n:Entity {id: $name})-[r]-(m)
@@ -54,13 +57,11 @@ def query_herbs_for_disease(disease_name):
 # ===================== 通用图谱检索函数 =====================
 def search_graph_context(question):
     context = []
-    # 过滤无用词汇
     stop_words = ["用什么", "什么药", "检测", "治疗", "含有", "属于", "？", "，", "。"]
     temp_q = question
     for word in stop_words:
         temp_q = temp_q.replace(word, "")
 
-    # 拆分关键词
     keywords = []
     for token in temp_q.split():
         if len(token) > 1:
@@ -69,7 +70,6 @@ def search_graph_context(question):
 
     entity_ids = set()
     with driver.session() as session:
-        # 匹配实体
         for kw in keywords:
             res = session.run("""
                 MATCH (n:Entity)
@@ -82,7 +82,6 @@ def search_graph_context(question):
         entity_ids = list(entity_ids)
         if entity_ids:
             context.append(f"✅ 匹配到的实体：{', '.join(entity_ids)}")
-            # 遍历实体，查询属性+全部关系
             for entity_id in entity_ids[:3]:
                 res_node = session.run("MATCH (n:Entity {id: $id}) RETURN n", id=entity_id)
                 node = list(res_node)[0]["n"]
@@ -90,7 +89,6 @@ def search_graph_context(question):
                 if props_str:
                     context.append(f"📋 {entity_id} 属性：{props_str}")
 
-                # 修复Cypher参数缺失
                 res_rel = session.run("""
                     MATCH (a:Entity)-[r]-(b:Entity)
                     WHERE a.id = $id OR b.id = $id
@@ -100,7 +98,6 @@ def search_graph_context(question):
                     s, r, t = rec.values()
                     context.append(f"🔗 {s} —[{r}]→ {t}")
 
-        # 兜底匹配所有关系
         for kw in keywords:
             res = session.run("""
                 MATCH (s:Entity)-[r]->(t:Entity)
@@ -113,14 +110,29 @@ def search_graph_context(question):
 
     return "\n".join(context) if context else "知识图谱中未查询到相关信息"
 
-# ===================== 智谱GLM API调用（修复401鉴权） =====================
+# ===================== 智谱API 签名鉴权（修复401错误） =====================
+def get_zhipu_token(app_id, app_secret):
+    """生成智谱临时Token，替代auth鉴权"""
+    timestamp = str(int(time.time()))
+    hmac_obj = hmac.new(
+        app_secret.encode("utf-8"),
+        (app_id + timestamp).encode("utf-8"),
+        digestmod=hashlib.sha256
+    )
+    signature = hmac_obj.hexdigest()
+    return f"{app_id}.{timestamp}.{signature}"
+
 def call_zhipu_api(app_id, app_secret, graph_context, user_question):
     url = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
-    headers = {"Content-Type": "application/json"}
+    token = get_zhipu_token(app_id, app_secret)
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json"
+    }
 
     system_prompt = """你是专业中医药顾问，严格遵守规则：
 1. 只依据【知识图谱检索结果】回答问题；
-2. 图谱有内容就如实总结，绝对不要编造图谱以外的药材、方剂、知识；
+2. 图谱有内容就如实总结，禁止编造药材、方剂和额外知识；
 3. 图谱无相关信息，请直接说明，并建议咨询专业中医师；
 4. 回答通俗易懂，条理清晰。"""
 
@@ -139,8 +151,7 @@ def call_zhipu_api(app_id, app_secret, graph_context, user_question):
         "temperature": 0.3
     }
 
-    # 正确传入 app_id / app_secret 完成鉴权
-    response = requests.post(url, headers=headers, json=payload, auth=(app_id, app_secret))
+    response = requests.post(url, headers=headers, json=payload, timeout=20)
     response.raise_for_status()
     return response.json()["choices"][0]["message"]["content"]
 
@@ -187,17 +198,16 @@ elif menu == "🤖 AI智能问答":
 
     if st.button("开始问答", type="primary") and user_question.strip():
         with st.spinner("正在检索图谱并思考..."):
-            # 读取密钥
             app_id = st.secrets["ZHIPU_APP_ID"]
             app_secret = st.secrets["ZHIPU_APP_SECRET"]
-            
             graph_ctx = search_graph_context(user_question)
+
             with st.expander("📚 知识图谱检索详情", expanded=False):
                 st.write(graph_ctx)
-            
+
             try:
                 answer = call_zhipu_api(app_id, app_secret, graph_ctx, user_question)
                 st.markdown("### ✅ AI 回答")
                 st.write(answer)
             except Exception as e:
-                st.error(f"调用大失败：{str(e)}")
+                st.error(f"调用大模型失败：{str(e)}")
