@@ -89,52 +89,47 @@ def call_tongyi_api(api_key, graph_context, user_question):
 def search_graph_context(question):
     context = []
     with driver.session() as session:
-        # ---------------------- 1. 优先查询【治疗】关系（核心修复！） ----------------------
-        # 专门匹配“什么药治什么病”的反向关系
-        # 关键词用 OR 匹配，同时支持“肾虚腰痛”“腰痛”“肾虚”
-        res = session.run("""
-            MATCH (m:Entity)-[r:治疗]->(d:Entity)
-            WHERE d.id CONTAINS "肾虚腰痛" 
-               OR d.id CONTAINS "腰痛" 
-               OR d.id CONTAINS "肾虚"
-            RETURN m.id, d.id, type(r)
-        """)
-        # 把所有匹配到的治疗关系写入上下文
-        for rec in res:
-            m_id, d_id, r_type = rec.values()
-            context.append(f"【图谱关系】药材 `{m_id}` →[{r_type}]→ 病症 `{d_id}`")
+        # ---------------------- 1. 第一步：优先匹配问题中的实体（比如“橘红”） ----------------------
+        # 直接用问题文本模糊匹配所有实体，不局限于“治疗”
+        entity_res = session.run("""
+            MATCH (n:Entity) WHERE n.id CONTAINS $kw RETURN n
+        """, kw=question)
+        entities = list(entity_res)
+        if entities:
+            context.append(f"匹配到的实体：{', '.join([rec['n']['id'] for rec in entities])}")
 
-        # ---------------------- 2. 补充查询：病症本身的属性 ----------------------
-        disease_res = session.run("""
-            MATCH (d:Entity) WHERE d.id = "肾虚腰痛" RETURN d
-        """)
-        for rec in disease_res:
-            disease = rec["d"]
-            props_str = ", ".join([f"{k}:{v}" for k, v in dict(disease).items() if v])
-            if props_str:
-                context.append(f"【病症属性】`肾虚腰痛`：{props_str}")
+            # 对每个匹配到的实体，提取：属性 + 所有关系
+            for rec in entities[:3]:  # 取前3个，避免信息过长
+                node = rec["n"]
+                node_id = node["id"]
 
-        # ---------------------- 3. 补充查询：匹配到的药材属性（如八角茴香） ----------------------
-        herb_ids = []
-        for line in context:
-            if "药材" in line:
-                herb_id = line.split("`")[1]
-                herb_ids.append(herb_id)
-        
-        for herb_id in set(herb_ids):
-            herb_res = session.run("""
-                MATCH (h:Entity) WHERE h.id = $id RETURN h
-            """, id=herb_id)
-            for rec in herb_res:
-                herb = rec["h"]
-                props_str = ", ".join([f"{k}:{v}" for k, v in dict(herb).items() if v])
+                # 提取实体的所有属性
+                props_str = ", ".join([f"{k}:{v}" for k, v in dict(node).items() if v])
                 if props_str:
-                    context.append(f"【药材属性】`{herb_id}`：{props_str}")
+                    context.append(f"【实体属性】{node_id}：{props_str}")
 
-    # 把所有信息拼接成文本，传给大模型
-    if not context:
-        return "知识图谱中未查询到相关信息"
-    return "\n".join(context)
+                # 提取实体的所有关联关系（不管关系叫什么名字）
+                rel_res = session.run("""
+                    MATCH (n:Entity)-[r]-(m:Entity)
+                    WHERE n.id = $id OR m.id = $id
+                    RETURN n.id, type(r), m.id
+                """, id=node_id)
+                for rel_rec in rel_res:
+                    s, r, t = rel_rec.values()
+                    context.append(f"【图谱关系】{s} —[{r}]→ {t}")
+
+        # ---------------------- 2. 第二步：反向匹配所有关系，不管类型 ----------------------
+        # 专门处理“用什么检测橘红”这种问题，匹配所有指向“橘红”的关系
+        rel_res = session.run("""
+            MATCH (s:Entity)-[r]->(t:Entity)
+            WHERE t.id CONTAINS $kw OR s.id CONTAINS $kw
+            RETURN s.id, type(r), t.id
+        """, kw=question)
+        for rec in rel_res:
+            s, r, t = rec.values()
+            context.append(f"【关联关系】{s} —[{r}]→ {t}")
+
+    return "\n".join(context) if context else "知识图谱中未查询到相关信息"
 
 # ---------------------- 6. 页面菜单（在原有基础上加AI问答） ----------------------
 menu = st.sidebar.selectbox(
