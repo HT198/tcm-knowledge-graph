@@ -89,47 +89,50 @@ def call_tongyi_api(api_key, graph_context, user_question):
 def search_graph_context(question):
     context = []
     with driver.session() as session:
-        # ---------------------- 1. 第一步：优先匹配问题中的实体（比如“橘红”） ----------------------
-        # 直接用问题文本模糊匹配所有实体，不局限于“治疗”
+        # ---------------------- 1. 先精准匹配实体（比如“橘红”） ----------------------
+        # 优先做完全匹配，避免模糊匹配遗漏
         entity_res = session.run("""
-            MATCH (n:Entity) WHERE n.id CONTAINS $kw RETURN n
+            MATCH (n:Entity) WHERE n.id = $kw OR n.id CONTAINS $kw RETURN n
         """, kw=question)
         entities = list(entity_res)
         if entities:
-            context.append(f"匹配到的实体：{', '.join([rec['n']['id'] for rec in entities])}")
+            context.append(f"✅ 匹配到的实体：{', '.join([rec['n']['id'] for rec in entities])}")
 
-            # 对每个匹配到的实体，提取：属性 + 所有关系
-            for rec in entities[:3]:  # 取前3个，避免信息过长
+            # 对每个实体，拉取【所有属性】和【所有关联关系】
+            for rec in entities[:3]:
                 node = rec["n"]
                 node_id = node["id"]
 
-                # 提取实体的所有属性
+                # 提取实体属性（性味、归经、检测相关等）
                 props_str = ", ".join([f"{k}:{v}" for k, v in dict(node).items() if v])
                 if props_str:
-                    context.append(f"【实体属性】{node_id}：{props_str}")
+                    context.append(f"📋 {node_id} 属性：{props_str}")
 
-                # 提取实体的所有关联关系（不管关系叫什么名字）
+                # 提取实体的所有关联关系（不管方向、不管关系名）
                 rel_res = session.run("""
-                    MATCH (n:Entity)-[r]-(m:Entity)
-                    WHERE n.id = $id OR m.id = $id
-                    RETURN n.id, type(r), m.id
+                    MATCH (a:Entity)-[r]-(b:Entity)
+                    WHERE a.id = $id OR b.id = $id
+                    RETURN a.id, type(r), b.id
                 """, id=node_id)
                 for rel_rec in rel_res:
                     s, r, t = rel_rec.values()
-                    context.append(f"【图谱关系】{s} —[{r}]→ {t}")
+                    context.append(f"🔗 图谱关系：{s} —[{r}]→ {t}")
 
-        # ---------------------- 2. 第二步：反向匹配所有关系，不管类型 ----------------------
-        # 专门处理“用什么检测橘红”这种问题，匹配所有指向“橘红”的关系
+        # ---------------------- 2. 反向匹配：所有和问题关键词相关的关系 ----------------------
+        # 处理“用什么检测橘红”这种问题，匹配所有指向/包含“橘红”的关系
         rel_res = session.run("""
             MATCH (s:Entity)-[r]->(t:Entity)
-            WHERE t.id CONTAINS $kw OR s.id CONTAINS $kw
+            WHERE s.id CONTAINS $kw OR t.id CONTAINS $kw
             RETURN s.id, type(r), t.id
         """, kw=question)
         for rec in rel_res:
             s, r, t = rec.values()
-            context.append(f"【关联关系】{s} —[{r}]→ {t}")
+            context.append(f"🔍 关联关系：{s} —[{r}]→ {t}")
 
-    return "\n".join(context) if context else "知识图谱中未查询到相关信息"
+    # 如果还是没数据，直接返回无结果
+    if not context:
+        return "知识图谱中未查询到相关信息"
+    return "\n".join(context)
 
 # ---------------------- 6. 页面菜单（在原有基础上加AI问答） ----------------------
 menu = st.sidebar.selectbox(
