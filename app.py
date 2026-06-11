@@ -61,9 +61,12 @@ def call_tongyi_api(api_key, graph_context, user_question):
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json"
     }
-    prompt = f"""你是专业的中医药顾问，请结合【知识图谱检索结果】回答用户问题。
-如果图谱中有相关信息，优先依据图谱内容作答；如果没有，可根据中医常识给出通用、安全的建议，
-并提醒用户咨询专业中医师辨证施治，不要编造不存在的药材。
+    prompt = f"""你是专业的中医药顾问，必须严格遵循以下规则回答问题：
+1.  优先依据【知识图谱检索结果】中的信息作答，图谱中提到的药材必须优先使用。
+2.  如果图谱中有明确的【治疗】关系（如“八角茴香 → 治疗 → 肾虚腰痛”），必须以该药材为核心回答。
+3.  禁止编造图谱中没有的药材、方剂（如金匮肾气丸、六味地黄丸等）。
+4.  图谱中提到的药材，可以结合它的属性（性味、归经、功能主治）补充说明。
+5.  如果图谱无数据，可说明情况并建议咨询专业中医师。
 
 【知识图谱检索结果】：
 {graph_context}
@@ -86,36 +89,52 @@ def call_tongyi_api(api_key, graph_context, user_question):
 def search_graph_context(question):
     context = []
     with driver.session() as session:
-        # 1. 先直接查询【治疗】关系，优先解决“什么药治什么病”的问题
-        # 直接用问题里的关键词匹配病症实体，不做宽泛模糊匹配
-        disease_res = session.run("""
+        # ---------------------- 1. 优先查询【治疗】关系（核心修复！） ----------------------
+        # 专门匹配“什么药治什么病”的反向关系
+        # 关键词用 OR 匹配，同时支持“肾虚腰痛”“腰痛”“肾虚”
+        res = session.run("""
             MATCH (m:Entity)-[r:治疗]->(d:Entity)
-            WHERE d.id CONTAINS $kw
-            RETURN m.id, d.id, type(r) LIMIT 10
-        """, kw=question)
-        for rec in disease_res:
-            m, d, r = rec.values()
-            context.append(f"药材【{m}】可治疗病症【{d}】（关系：{r}）")
-
-        # 2. 再精准匹配病症实体本身，查看属性
-        entity_res = session.run("""
-            MATCH (n:Entity) WHERE n.id = $kw RETURN n
-        """, kw=question)
-        for rec in entity_res:
-            node = rec["n"]
-            props_str = ", ".join([f"{k}:{v}" for k, v in dict(node).items() if v])
-            if props_str:
-                context.append(f"【{question}】的属性：{props_str}")
-
-        # 3. 匹配问题中的核心药材（如果问题里有药材名）
-        herb_res = session.run("""
-            MATCH (n:Entity) WHERE n.id IN ['肾虚腰痛', '腰痛', '肾虚'] RETURN n.id LIMIT 5
+            WHERE d.id CONTAINS "肾虚腰痛" 
+               OR d.id CONTAINS "腰痛" 
+               OR d.id CONTAINS "肾虚"
+            RETURN m.id, d.id, type(r)
         """)
-        herb_ids = [rec["n.id"] for rec in herb_res]
-        if herb_ids:
-            context.append(f"匹配到的相关实体：{', '.join(herb_ids)}")
+        # 把所有匹配到的治疗关系写入上下文
+        for rec in res:
+            m_id, d_id, r_type = rec.values()
+            context.append(f"【图谱关系】药材 `{m_id}` →[{r_type}]→ 病症 `{d_id}`")
 
-    return "\n".join(context) if context else "知识图谱中未查询到相关信息"
+        # ---------------------- 2. 补充查询：病症本身的属性 ----------------------
+        disease_res = session.run("""
+            MATCH (d:Entity) WHERE d.id = "肾虚腰痛" RETURN d
+        """)
+        for rec in disease_res:
+            disease = rec["d"]
+            props_str = ", ".join([f"{k}:{v}" for k, v in dict(disease).items() if v])
+            if props_str:
+                context.append(f"【病症属性】`肾虚腰痛`：{props_str}")
+
+        # ---------------------- 3. 补充查询：匹配到的药材属性（如八角茴香） ----------------------
+        herb_ids = []
+        for line in context:
+            if "药材" in line:
+                herb_id = line.split("`")[1]
+                herb_ids.append(herb_id)
+        
+        for herb_id in set(herb_ids):
+            herb_res = session.run("""
+                MATCH (h:Entity) WHERE h.id = $id RETURN h
+            """, id=herb_id)
+            for rec in herb_res:
+                herb = rec["h"]
+                props_str = ", ".join([f"{k}:{v}" for k, v in dict(herb).items() if v])
+                if props_str:
+                    context.append(f"【药材属性】`{herb_id}`：{props_str}")
+
+    # 把所有信息拼接成文本，传给大模型
+    if not context:
+        return "知识图谱中未查询到相关信息"
+    return "\n".join(context)
 
 # ---------------------- 6. 页面菜单（在原有基础上加AI问答） ----------------------
 menu = st.sidebar.selectbox(
