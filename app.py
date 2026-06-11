@@ -54,9 +54,10 @@ def query_herbs_for_disease(disease_name):
         data = [rec.data() for rec in records]
         return pd.DataFrame(data)
 
-# ===================== 通用图谱检索函数 =====================
+# ===================== 精简版图谱检索（缩短内容，防止超时） =====================
 def search_graph_context(question):
     context = []
+    # 过滤无用词汇
     stop_words = ["用什么", "什么药", "检测", "治疗", "含有", "属于", "？", "，", "。"]
     temp_q = question
     for word in stop_words:
@@ -74,50 +75,40 @@ def search_graph_context(question):
             res = session.run("""
                 MATCH (n:Entity)
                 WHERE n.id = $kw OR n.id CONTAINS $kw
-                RETURN n.id
+                RETURN n.id LIMIT 3
             """, kw=kw)
             for rec in res:
                 entity_ids.add(rec["n.id"])
 
-        entity_ids = list(entity_ids)
+        entity_ids = list(entity_ids)[:2]  # 只取前2个实体，减少数据量
         if entity_ids:
-            context.append(f"✅ 匹配到的实体：{', '.join(entity_ids)}")
-            for entity_id in entity_ids[:3]:
+            context.append(f"匹配实体：{', '.join(entity_ids)}")
+            for entity_id in entity_ids:
                 res_node = session.run("MATCH (n:Entity {id: $id}) RETURN n", id=entity_id)
                 node = list(res_node)[0]["n"]
                 props_str = ", ".join([f"{k}:{v}" for k, v in dict(node).items() if v])
                 if props_str:
-                    context.append(f"📋 {entity_id} 属性：{props_str}")
+                    context.append(f"{entity_id} 属性：{props_str}")
 
                 res_rel = session.run("""
                     MATCH (a:Entity)-[r]-(b:Entity)
                     WHERE a.id = $id OR b.id = $id
-                    RETURN a.id, type(r), b.id
+                    RETURN a.id, type(r), b.id LIMIT 5
                 """, id=entity_id)
                 for rec in res_rel:
                     s, r, t = rec.values()
-                    context.append(f"🔗 {s} —[{r}]→ {t}")
+                    context.append(f"{s} - {r} - {t}")
 
-        for kw in keywords:
-            res = session.run("""
-                MATCH (s:Entity)-[r]->(t:Entity)
-                WHERE s.id CONTAINS $kw OR t.id CONTAINS $kw
-                RETURN s.id, type(r), t.id
-            """, kw=kw)
-            for rec in res:
-                s, r, t = rec.values()
-                context.append(f"🔍 {s} —[{r}]→ {t}")
+    return "\n".join(context) if context else "暂无相关图谱数据"
 
-    return "\n".join(context) if context else "知识图谱中未查询到相关信息"
-
-# ===================== 讯飞星火 API 调用 =====================
+# ===================== 讯飞星火 API（精简请求+重试+短超时） =====================
 def call_spark(appid, apikey, apisecret, graph_context, user_question):
     url = "https://spark-api.xf-yun.com/v1.1/chat"
     host = "spark-api.xf-yun.com"
     path = "/v1.1/chat"
     timestamp = str(int(time.time()))
-    
-    # 生成签名
+
+    # 签名计算
     md5 = hashlib.md5()
     md5.update((apikey + timestamp).encode("utf-8"))
     checksum = md5.hexdigest()
@@ -129,16 +120,9 @@ def call_spark(appid, apikey, apisecret, graph_context, user_question):
         "Host": host
     }
 
-    system_prompt = """你是专业中医药顾问，严格按照要求作答：
-1. 仅依据【知识图谱检索结果】内容回答，禁止编造任何图谱外药材、方剂、知识；
-2. 图谱无相关信息，请如实说明，并建议咨询专业中医师；
-3. 回答通俗易懂、条理清晰。"""
-
-    full_text = f"""【知识图谱检索结果】
-{graph_context}
-
-【用户问题】
-{user_question}"""
+    # 极度精简提示词（减少传输体积，提速防超时）
+    system_prompt = "依据下方图谱数据回答，无数据请建议咨询中医师，禁止编造内容。"
+    full_text = f"图谱数据：{graph_context}\n用户问题：{user_question}"
 
     payload = {
         "header": {"app_id": appid},
@@ -153,9 +137,16 @@ def call_spark(appid, apikey, apisecret, graph_context, user_question):
         }
     }
 
-    response = requests.post(url, headers=headers, json=payload, timeout=25)
-    response.raise_for_status()
-    return response.json()["payload"]["choices"]["text"][0]["content"]
+    # 单次重试 + 缩短超时为15秒
+    for _ in range(2):
+        try:
+            response = requests.post(url, headers=headers, json=payload, timeout=15)
+            response.raise_for_status()
+            return response.json()["payload"]["choices"]["text"][0]["content"]
+        except:
+            time.sleep(1)
+            continue
+    return "接口请求超时/网络异常，请稍后重试"
 
 # ===================== 页面交互 =====================
 menu = st.sidebar.selectbox(
@@ -199,26 +190,20 @@ elif menu == "🤖 AI智能问答":
     user_question = st.text_area("请输入问题", placeholder="例如：肾虚腰痛用什么药？", height=100)
 
     if st.button("开始问答", type="primary") and user_question.strip():
-        with st.spinner("正在检索图谱并思考..."):
-            # 读取密钥并捕获异常
+        with st.spinner("正在检索并请求AI..."):
             try:
                 appid = st.secrets["XF_APPID"]
-                apikey = st.secrets["XF_APIKEY"]
+                apikey = st.secrets["XF_APICKEY"]
                 apisecret = st.secrets["XF_APISecret"]
             except KeyError:
-                st.error("密钥配置缺失，请检查Secrets")
+                st.error("密钥配置缺失！")
                 st.stop()
 
             graph_ctx = search_graph_context(user_question)
             with st.expander("📚 知识图谱检索详情", expanded=False):
                 st.write(graph_ctx)
 
-            # 调用讯飞接口 + 异常捕获
-            try:
-                answer = call_spark(appid, apikey, apisecret, graph_ctx, user_question)
-                st.markdown("### ✅ AI 回答")
-                st.write(answer)
-            except requests.exceptions.RequestException:
-                st.error("接口请求超时/网络异常，请稍后重试")
-            except Exception as e:
-                st.error(f"调用AI失败：{str(e)}")
+            # 调用AI
+            answer = call_spark(appid, apikey, apisecret, graph_ctx, user_question)
+            st.markdown("### ✅ AI 回答")
+            st.write(answer)
