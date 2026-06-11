@@ -17,9 +17,8 @@ def init_driver():
 
 driver = init_driver()
 
-# ===================== 原有功能函数 =====================
+# ===================== 实体查询函数 =====================
 def get_entity_info(entity_name):
-    """查询实体属性+关联关系"""
     with driver.session() as session:
         res = session.run("MATCH (n:Entity {id: $name}) RETURN n", name=entity_name)
         records = list(res)
@@ -40,8 +39,8 @@ def get_entity_info(entity_name):
         relations = [rec.data() for rec in rel_list]
     return props, relations
 
+# ===================== 病症查药材函数 =====================
 def query_herbs_for_disease(disease_name):
-    """根据病症查询药材"""
     with driver.session() as session:
         res = session.run("""
             MATCH (m:Entity)-[r]->(d:Entity {id: $disease})
@@ -55,7 +54,7 @@ def query_herbs_for_disease(disease_name):
 # ===================== 通用图谱检索函数 =====================
 def search_graph_context(question):
     context = []
-    # 过滤无用助词
+    # 过滤无用词汇
     stop_words = ["用什么", "什么药", "检测", "治疗", "含有", "属于", "？", "，", "。"]
     temp_q = question
     for word in stop_words:
@@ -70,7 +69,7 @@ def search_graph_context(question):
 
     entity_ids = set()
     with driver.session() as session:
-        # 1. 关键词匹配实体
+        # 匹配实体
         for kw in keywords:
             res = session.run("""
                 MATCH (n:Entity)
@@ -83,8 +82,7 @@ def search_graph_context(question):
         entity_ids = list(entity_ids)
         if entity_ids:
             context.append(f"✅ 匹配到的实体：{', '.join(entity_ids)}")
-
-            # 2. 遍历实体：属性 + 所有关系
+            # 遍历实体，查询属性+全部关系
             for entity_id in entity_ids[:3]:
                 res_node = session.run("MATCH (n:Entity {id: $id}) RETURN n", id=entity_id)
                 node = list(res_node)[0]["n"]
@@ -92,16 +90,17 @@ def search_graph_context(question):
                 if props_str:
                     context.append(f"📋 {entity_id} 属性：{props_str}")
 
+                # 修复Cypher参数缺失
                 res_rel = session.run("""
                     MATCH (a:Entity)-[r]-(b:Entity)
-                    WHERE a.id = $id OR b.id
+                    WHERE a.id = $id OR b.id = $id
                     RETURN a.id, type(r), b.id
                 """, id=entity_id)
                 for rec in res_rel:
                     s, r, t = rec.values()
                     context.append(f"🔗 {s} —[{r}]→ {t}")
 
-        # 3. 兜底：全局关系匹配
+        # 兜底匹配所有关系
         for kw in keywords:
             res = session.run("""
                 MATCH (s:Entity)-[r]->(t:Entity)
@@ -114,7 +113,7 @@ def search_graph_context(question):
 
     return "\n".join(context) if context else "知识图谱中未查询到相关信息"
 
-# ===================== 智谱 GLM-4-Flash 接口（修复鉴权） =====================
+# ===================== 智谱GLM API调用（修复401鉴权） =====================
 def call_zhipu_api(app_id, app_secret, graph_context, user_question):
     url = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
     headers = {"Content-Type": "application/json"}
@@ -135,23 +134,23 @@ def call_zhipu_api(app_id, app_secret, graph_context, user_question):
         "model": "glm-4-flash",
         "messages": [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content"}
+            {"role": "user", "content": user_content}
         ],
         "temperature": 0.3
     }
 
-    # 正确传参：auth=(app_id, app_secret)
+    # 正确传入 app_id / app_secret 完成鉴权
     response = requests.post(url, headers=headers, json=payload, auth=(app_id, app_secret))
     response.raise_for_status()
     return response.json()["choices"][0]["message"]["content"]
 
-# ===================== 页面菜单与交互 =====================
+# ===================== 页面交互 =====================
 menu = st.sidebar.selectbox(
     "功能菜单",
     ["实体查询", "病症找药", "🤖 AI智能问答"]
 )
 
-# 1. 实体查询
+# 实体查询
 if menu == "实体查询":
     st.subheader("📌 药材/实体查询")
     entity_name = st.text_input("输入实体名称（如：丁香）", "丁香")
@@ -168,7 +167,7 @@ if menu == "实体查询":
             else:
                 st.info("该实体暂无关联关系")
 
-# 2. 病症找药
+# 病症找药
 elif menu == "病症找药":
     st.subheader("💊 根据病症查询推荐药材")
     disease = st.text_input("输入病症名称（如：肾虚阳痿）", "肾虚阳痿")
@@ -180,7 +179,7 @@ elif menu == "病症找药":
             st.success(f"找到{len(df)}种相关药材")
             st.dataframe(df, use_container_width)
 
-# 3. AI 智能问答
+# AI 智能问答
 elif menu == "🤖 AI智能问答":
     st.subheader("🤖 AI智能问答")
     st.info("基于知识图谱作答，仅使用图谱内数据")
@@ -188,7 +187,7 @@ elif menu == "🤖 AI智能问答":
 
     if st.button("开始问答", type="primary") and user_question.strip():
         with st.spinner("正在检索图谱并思考..."):
-            # 从Secrets读取拆分后的密钥
+            # 读取密钥
             app_id = st.secrets["ZHIPU_APP_ID"]
             app_secret = st.secrets["ZHIPU_APP_SECRET"]
             
@@ -201,4 +200,4 @@ elif menu == "🤖 AI智能问答":
                 st.markdown("### ✅ AI 回答")
                 st.write(answer)
             except Exception as e:
-                st.error(f"调用大模型失败：{str(e)}")
+                st.error(f"调用大失败：{str(e)}")
