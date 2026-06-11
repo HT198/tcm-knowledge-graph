@@ -1,3 +1,5 @@
 streamlit
 neo4j
 pandas
+langchain==0.2.10
+langchain-openai==0.1.14
