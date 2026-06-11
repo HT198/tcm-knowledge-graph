@@ -89,50 +89,64 @@ def call_tongyi_api(api_key, graph_context, user_question):
 def search_graph_context(question):
     context = []
     with driver.session() as session:
-        # ---------------------- 1. 先精准匹配实体（比如“橘红”） ----------------------
-        # 优先做完全匹配，避免模糊匹配遗漏
-        entity_res = session.run("""
-            MATCH (n:Entity) WHERE n.id = $kw OR n.id CONTAINS $kw RETURN n
-        """, kw=question)
-        entities = list(entity_res)
-        if entities:
-            context.append(f"✅ 匹配到的实体：{', '.join([rec['n']['id'] for rec in entities])}")
+        # ---------------------- 1. 从问题中提取关键词（简单分词） ----------------------
+        keywords = []
+        # 把问题按空格/标点拆分，提取有意义的词
+        for token in question.replace("？", "").replace("用什么", "").replace("什么药", "").split():
+            if len(token) > 1:  # 过滤掉单字虚词
+                keywords.append(token)
+        # 加上原问题文本，兜底匹配
+        keywords.append(question)
 
-            # 对每个实体，拉取【所有属性】和【所有关联关系】
-            for rec in entities[:3]:
-                node = rec["n"]
-                node_id = node["id"]
+        # ---------------------- 2. 匹配所有相关实体（含模糊匹配） ----------------------
+        entity_ids = set()
+        for kw in keywords:
+            # 优先精准匹配，再模糊匹配
+            res = session.run("""
+                MATCH (n:Entity)
+                WHERE n.id = $kw OR n.id CONTAINS $kw
+                RETURN n.id
+            """, kw=kw)
+            for rec in res:
+                entity_ids.add(rec["n.id"])
+        
+        entity_ids = list(entity_ids)
+        if entity_ids:
+            context.append(f"✅ 匹配到的实体：{', '.join(entity_ids)}")
 
-                # 提取实体属性（性味、归经、检测相关等）
+            # ---------------------- 3. 对每个实体，拉取【属性】和【所有进出关系】 ----------------------
+            for entity_id in entity_ids[:3]:  # 取前3个，避免上下文过长
+                # 3.1 提取实体属性
+                res = session.run("""
+                    MATCH (n:Entity {id: $id}) RETURN n
+                """, id=entity_id)
+                node = list(res)[0]["n"]
                 props_str = ", ".join([f"{k}:{v}" for k, v in dict(node).items() if v])
                 if props_str:
-                    context.append(f"📋 {node_id} 属性：{props_str}")
+                    context.append(f"📋 {entity_id} 属性：{props_str}")
 
-                # 提取实体的所有关联关系（不管方向、不管关系名）
-                rel_res = session.run("""
+                # 3.2 提取所有关系（不管方向、不管关系名）
+                res_rel = session.run("""
                     MATCH (a:Entity)-[r]-(b:Entity)
                     WHERE a.id = $id OR b.id = $id
                     RETURN a.id, type(r), b.id
-                """, id=node_id)
-                for rel_rec in rel_res:
-                    s, r, t = rel_rec.values()
+                """, id=entity_id)
+                for rec in res_rel:
+                    s, r, t = rec.values()
                     context.append(f"🔗 图谱关系：{s} —[{r}]→ {t}")
 
-        # ---------------------- 2. 反向匹配：所有和问题关键词相关的关系 ----------------------
-        # 处理“用什么检测橘红”这种问题，匹配所有指向/包含“橘红”的关系
-        rel_res = session.run("""
-            MATCH (s:Entity)-[r]->(t:Entity)
-            WHERE s.id CONTAINS $kw OR t.id CONTAINS $kw
-            RETURN s.id, type(r), t.id
-        """, kw=question)
-        for rec in rel_res:
-            s, r, t = rec.values()
-            context.append(f"🔍 关联关系：{s} —[{r}]→ {t}")
+        # ---------------------- 4. 反向兜底：匹配所有包含关键词的关系 ----------------------
+        for kw in keywords:
+            res = session.run("""
+                MATCH (s:Entity)-[r]->(t:Entity)
+                WHERE s.id CONTAINS $kw OR t.id CONTAINS $kw
+                RETURN s.id, type(r), t.id
+            """, kw=kw)
+            for rec in res:
+                s, r, t = rec.values()
+                context.append(f"🔍 关联关系：{s} —[{r}]→ {t}")
 
-    # 如果还是没数据，直接返回无结果
-    if not context:
-        return "知识图谱中未查询到相关信息"
-    return "\n".join(context)
+    return "\n".join(context) if context else "知识图谱中未查询到相关信息"
 
 # ---------------------- 6. 页面菜单（在原有基础上加AI问答） ----------------------
 menu = st.sidebar.selectbox(
