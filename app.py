@@ -5,6 +5,8 @@ import requests
 import time
 import hashlib
 import base64
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry
 
 # 页面基础配置
 st.set_page_config(page_title="中医药知识图谱+AI问答", layout="wide")
@@ -54,99 +56,94 @@ def query_herbs_for_disease(disease_name):
         data = [rec.data() for rec in records]
         return pd.DataFrame(data)
 
-# ===================== 精简版图谱检索 =====================
+# ===================== 极简图谱检索（最小化传输内容） =====================
 def search_graph_context(question):
     context = []
+    # 过滤停用词
     stop_words = ["用什么", "什么药", "检测", "治疗", "含有", "属于", "？", "，", "。"]
     temp_q = question
     for word in stop_words:
         temp_q = temp_q.replace(word, "")
 
-    keywords = []
-    for token in temp_q.split():
-        if len(token) > 1:
-            keywords.append(token)
+    keywords = [w for w in temp_q.split() if len(w) > 1]
     keywords.append(question)
 
     entity_ids = set()
     with driver.session() as session:
+        # 限制实体数量
         for kw in keywords:
-            res = session.run("""
-                MATCH (n:Entity)
-                WHERE n.id = $kw OR n.id CONTAINS $kw
-                RETURN n.id LIMIT 3
-            """, kw=kw)
+            res = session.run("MATCH (n:Entity) WHERE n.id CONTAINS $kw RETURN n.id LIMIT 2", kw=kw)
             for rec in res:
                 entity_ids.add(rec["n.id"])
-
         entity_ids = list(entity_ids)[:2]
+
         if entity_ids:
-            context.append(f"匹配实体：{', '.join(entity_ids)}")
-            for entity_id in entity_ids:
-                res_node = session.run("MATCH (n:Entity {id: $id}) RETURN n", id=entity_id)
-                node = list(res_node)[0]["n"]
-                props_str = ", ".join([f"{k}:{v}" for k, v in dict(node).items() if v])
-                if props_str:
-                    context.append(f"{entity_id} 属性：{props_str}")
+            context.append(f"实体：{', '.join(entity_ids)}")
+            for e_id in entity_ids:
+                # 实体属性
+                node = session.run("MATCH (n{id:$id}) RETURN n", id=e_id).single()["n"]
+                props = [f"{k}:{v}" for k, v in dict(node).items() if v]
+                if props:
+                    context.append(f"{e_id}：{' | '.join(props)}")
+                # 限制关系数量
+                rels = session.run("""
+                MATCH (a)-[r]-(b) WHERE a.id=$id RETURN a,type(r),b LIMIT 4
+                """, id=e_id)
+                for r in rels:
+                    context.append(f"{r['a'].id} - {r[1]} - {r['b'].id}")
+    return "\n".join(context) if context else "无图谱数据"
 
-                res_rel = session.run("""
-                    MATCH (a:Entity)-[r]-(b:Entity)
-                    WHERE a.id = $id OR b.id = $id
-                    RETURN a.id, type(r), b.id LIMIT 5
-                """, id=entity_id)
-                for rec in res_rel:
-                    s, r, t = rec.values()
-                    context.append(f"{s} - {r} - {t}")
+# ===================== 讯飞星火 API（网络深度优化） =====================
+def create_retry_session():
+    """创建带自动重试的请求会话，解决网络波动"""
+    session = requests.Session()
+    # 重试规则：超时/连接错误自动重试3次，间隔1s
+    retry_strategy = Retry(
+        total=3,
+        backoff_factor=1,
+        status_forcelist=[500, 502, 503, 504]
+    )
+    adapter = HTTPAdapter(max_retries=retry_strategy)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
 
-    return "\n".join(context) if context else "暂无相关图谱数据"
-
-# ===================== 讯飞星火 API（适配你提供的密钥和地址） =====================
-def call_spark(appid, api_key, api_secret, graph_context, user_question):
+def call_spark(appid, api_key, api_secret, graph_ctx, user_q):
     url = "https://spark-api.xf-yun.com/v1.1/chat"
-    host = "spark-api.xf-yun.com"
-    path = "/v1.1/chat"
     timestamp = str(int(time.time()))
-
-    # 按讯飞官方规则生成签名
-    hmac_data = api_key + timestamp
-    md5 = hashlib.md5()
-    md5.update(hmac_data.encode("utf-8"))
+    # 签名计算
+    md5 = hashlib.md5((api_key + timestamp).encode("utf-8"))
     checksum = md5.hexdigest()
     auth = base64.b64encode(f"{appid}:{api_secret}".encode()).decode()
-
     headers = {
         "Authorization": f"Bearer {auth},{timestamp},{checksum}",
-        "Content-Type": "application/json",
-        "Host": host
+        "Content-Type": "application/json"
     }
-
-    # 精简提示词，减少超时
-    system_prompt = "依据下方图谱数据回答，无数据请建议咨询中医师，禁止编造内容。"
-    full_text = f"图谱数据：{graph_context}\n用户问题：{user_question}"
-
+    # 极简提示词
+    sys_prompt = "仅依据下方图谱内容回答，无数据请建议咨询中医师，禁止编造。"
+    full_msg = f"图谱：{graph_ctx}\n问题：{user_q}"
     payload = {
         "header": {"app_id": appid},
         "parameter": {"chat": {"domain": "lite", "temperature": 0.3}},
-        "payload": {
-            "message": {
-                "text": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": full_text}
-                ]
-            }
-        }
+        "payload": {"message": {"text": [
+            {"role": "system", "content": sys_prompt},
+            {"role": "user", "content": full_msg}
+        ]}}
     }
-
-    # 增加1次重试，超时15秒
-    for _ in range(2):
-        try:
-            response = requests.post(url, headers=headers, json=payload, timeout=15)
-            response.raise_for_status()
-            return response.json()["payload"]["choices"]["text"][0]["content"]
-        except:
-            time.sleep(1)
-            continue
-    return "接口请求超时/网络异常，请稍后重试"
+    session = create_retry_session()
+    # 拆分超时：连接5秒，读取30秒（适配大模型响应）
+    try:
+        response = session.post(url, headers=headers, json=payload, timeout=(5, 30))
+        response.raise_for_status()
+        return response.json()["payload"]["choices"]["text"][0]["content"]
+    except requests.exceptions.ConnectionError:
+        return "错误：无法连接讯飞接口，网络不通"
+    except requests.exceptions.ReadTimeout:
+        return "错误：接口读取超时，请稍后重试"
+    except requests.exceptions.Timeout:
+        return "错误：请求超时，请稍后重试"
+    except Exception as e:
+        return f"接口异常：{str(e)}"
 
 # ===================== 页面交互 =====================
 menu = st.sidebar.selectbox(
@@ -161,12 +158,10 @@ if menu == "实体查询":
     if st.button("查询"):
         props, relations = get_entity_info(entity_name)
         if props is None:
-            st.warning("未找到该实体，请检查名称是否正确")
+            st.warning("未找到该实体，请检查名称")
         else:
-            st.markdown("### 基本属性")
             st.dataframe(pd.DataFrame(list(props.items()), columns=["属性", "值"]), use_container_width)
             if relations:
-                st.markdown("### 关联关系")
                 st.dataframe(pd.DataFrame(relations), use_container_width)
             else:
                 st.info("该实体暂无关联关系")
@@ -186,25 +181,24 @@ elif menu == "病症找药":
 # AI 智能问答
 elif menu == "🤖 AI智能问答":
     st.subheader("🤖 AI智能问答")
-    st.info("基于知识图谱作答，仅使用图谱内数据")
-    user_question = st.text_area("请输入问题", placeholder="例如：肾虚腰痛用什么药？", height=100)
+    st.info("基于知识图谱作答")
+    user_question = st.text_area("请输入问题", placeholder="例如：丁香的功效是什么？", height=100)
 
     if st.button("开始问答", type="primary") and user_question.strip():
-        with st.spinner("正在检索并请求AI..."):
-            # 读取密钥并捕获异常
+        with st.spinner("正在处理..."):
+            # 读取密钥
             try:
                 appid = st.secrets["XF_APPID"]
                 api_key = st.secrets["XF_API_KEY"]
                 api_secret = st.secrets["XF_API_SECRET"]
-            except KeyError as e:
-                st.error(f"密钥配置缺失！请检查Secrets中是否存在 {e}")
+            except KeyError:
+                st.error("密钥配置缺失！")
                 st.stop()
-
-            graph_ctx = search_graph_context(user_question)
+            # 检索图谱
+            graph_data = search_graph_context(user_question)
             with st.expander("📚 知识图谱检索详情", expanded=False):
-                st.write(graph_ctx)
-
+                st.write(graph_data)
             # 调用AI
-            answer = call_spark(appid, api_key, api_secret, graph_ctx, user_question)
+            res = call_spark(appid, api_key, api_secret, graph_data, user_question)
             st.markdown("### ✅ AI 回答")
-            st.write(answer)
+            st.write(res)
