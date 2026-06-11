@@ -63,7 +63,7 @@ def search_graph_context(question):
 
     # 拆分关键词
     keywords = []
-    for token in temp.split():
+    for token in temp_q.split():
         if len(token) > 1:
             keywords.append(token)
     keywords.append(question)
