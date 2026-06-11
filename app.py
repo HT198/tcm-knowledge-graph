@@ -4,7 +4,7 @@ import pandas as pd
 import requests
 import time
 import hashlib
-import hmac
+import base64
 
 # 页面基础配置
 st.set_page_config(page_title="中医药知识图谱+AI问答", layout="wide")
@@ -110,50 +110,38 @@ def search_graph_context(question):
 
     return "\n".join(context) if context else "知识图谱中未查询到相关信息"
 
-# ===================== 智谱API 签名鉴权（修复401错误） =====================
-def get_zhipu_token(app_id, app_secret):
-    """生成智谱临时Token，替代auth鉴权"""
+# ===================== 讯飞星火Lite 调用 =====================
+def call_spark(appid, apikey, apisecret, graph_context, user_question):
+    url = "https://spark-api.xf-yun.com/v1.1/chat"
+    host = "spark-api.xf-yun.com"
+    path = "/v1.1/chat"
     timestamp = str(int(time.time()))
-    hmac_obj = hmac.new(
-        app_secret.encode("utf-8"),
-        (app_id + timestamp).encode("utf-8"),
-        digestmod=hashlib.sha256
-    )
-    signature = hmac_obj.hexdigest()
-    return f"{app_id}.{timestamp}.{signature}"
-
-def call_zhipu_api(app_id, app_secret, graph_context, user_question):
-    url = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
-    token = get_zhipu_token(app_id, app_secret)
+    # 签名
+    tmp = apikey + timestamp
+    md5_val = hashlib.md5(tmp.encode("utf-8")).hexdigest()
+    auth = base64.b64encode(f"{appid}:{apisecret}".encode()).decode()
     headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json"
+        "Authorization": f"Bearer {auth},{timestamp},{md5}",
+        "Content-Type": "application/json",
+        "Host": host
     }
-
-    system_prompt = """你是专业中医药顾问，严格遵守规则：
-1. 只依据【知识图谱检索结果】回答问题；
-2. 图谱有内容就如实总结，禁止编造药材、方剂和额外知识；
-3. 图谱无相关信息，请直接说明，并建议咨询专业中医师；
-4. 回答通俗易懂，条理清晰。"""
-
-    user_content = f"""【知识图谱检索结果】
-{graph_context}
-
-【用户问题】
-{user_question}"""
-
+    system_prompt = """你是专业中医药顾问，仅依据知识图谱内容回答，禁止编造，无数据请建议就医。"""
+    full_text = f"""【知识图谱】{graph_context}\n【问题】{user_question}"""
     payload = {
-        "model": "glm-4-flash",
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_content}
-        ],
-        "temperature": 0.3
+        "header": {"app_id": appid},
+        "parameter": {"chat": {"domain": "lite", "temperature": 0.3}},
+        "payload": {
+            "message": {
+                "text": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": full_text}
+                ]
+            }
+        }
     }
-
-    response = requests.post(url, headers=headers, json=payload, timeout=20)
-    response.raise_for_status()
-    return response.json()["choices"][0]["message"]["content"]
+    res = requests.post(url, headers=headers, json=payload, timeout=20)
+    res.raise_for_status()
+    return res.json()["payload"]["choices"]["text"][0]["content"]
 
 # ===================== 页面交互 =====================
 menu = st.sidebar.selectbox(
@@ -198,15 +186,16 @@ elif menu == "🤖 AI智能问答":
 
     if st.button("开始问答", type="primary") and user_question.strip():
         with st.spinner("正在检索图谱并思考..."):
-            app_id = st.secrets["ZHIPU_APP_ID"]
-            app_secret = st.secrets["ZHIPU_APP_SECRET"]
+            appid = st.secrets["XF_APPID"]
+            apikey = st.secrets["XF_APICKEY"]
+            apisecret = st.secrets["XF_APISecret"]
             graph_ctx = search_graph_context(user_question)
 
             with st.expander("📚 知识图谱检索详情", expanded=False):
                 st.write(graph_ctx)
 
             try:
-                answer = call_zhipu_api(app_id, app_secret, graph_ctx, user_question)
+                answer = call_spark(appid, apikey, apisecret, graph_ctx, user_question)
                 st.markdown("### ✅ AI 回答")
                 st.write(answer)
             except Exception as e:
