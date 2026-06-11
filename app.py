@@ -54,10 +54,9 @@ def query_herbs_for_disease(disease_name):
         data = [rec.data() for rec in records]
         return pd.DataFrame(data)
 
-# ===================== 精简版图谱检索（缩短内容，防止超时） =====================
+# ===================== 精简版图谱检索 =====================
 def search_graph_context(question):
     context = []
-    # 过滤无用词汇
     stop_words = ["用什么", "什么药", "检测", "治疗", "含有", "属于", "？", "，", "。"]
     temp_q = question
     for word in stop_words:
@@ -80,7 +79,7 @@ def search_graph_context(question):
             for rec in res:
                 entity_ids.add(rec["n.id"])
 
-        entity_ids = list(entity_ids)[:2]  # 只取前2个实体，减少数据量
+        entity_ids = list(entity_ids)[:2]
         if entity_ids:
             context.append(f"匹配实体：{', '.join(entity_ids)}")
             for entity_id in entity_ids:
@@ -101,18 +100,19 @@ def search_graph_context(question):
 
     return "\n".join(context) if context else "暂无相关图谱数据"
 
-# ===================== 讯飞星火 API（精简请求+重试+短超时） =====================
-def call_spark(appid, apikey, apisecret, graph_context, user_question):
+# ===================== 讯飞星火 API（适配你提供的密钥和地址） =====================
+def call_spark(appid, api_key, api_secret, graph_context, user_question):
     url = "https://spark-api.xf-yun.com/v1.1/chat"
     host = "spark-api.xf-yun.com"
     path = "/v1.1/chat"
     timestamp = str(int(time.time()))
 
-    # 签名计算
+    # 按讯飞官方规则生成签名
+    hmac_data = api_key + timestamp
     md5 = hashlib.md5()
-    md5.update((apikey + timestamp).encode("utf-8"))
+    md5.update(hmac_data.encode("utf-8"))
     checksum = md5.hexdigest()
-    auth = base64.b64encode(f"{appid}:{apisecret}".encode()).decode()
+    auth = base64.b64encode(f"{appid}:{api_secret}".encode()).decode()
 
     headers = {
         "Authorization": f"Bearer {auth},{timestamp},{checksum}",
@@ -120,7 +120,7 @@ def call_spark(appid, apikey, apisecret, graph_context, user_question):
         "Host": host
     }
 
-    # 极度精简提示词（减少传输体积，提速防超时）
+    # 精简提示词，减少超时
     system_prompt = "依据下方图谱数据回答，无数据请建议咨询中医师，禁止编造内容。"
     full_text = f"图谱数据：{graph_context}\n用户问题：{user_question}"
 
@@ -137,7 +137,7 @@ def call_spark(appid, apikey, apisecret, graph_context, user_question):
         }
     }
 
-    # 单次重试 + 缩短超时为15秒
+    # 增加1次重试，超时15秒
     for _ in range(2):
         try:
             response = requests.post(url, headers=headers, json=payload, timeout=15)
@@ -191,12 +191,13 @@ elif menu == "🤖 AI智能问答":
 
     if st.button("开始问答", type="primary") and user_question.strip():
         with st.spinner("正在检索并请求AI..."):
+            # 读取密钥并捕获异常
             try:
                 appid = st.secrets["XF_APPID"]
-                apikey = st.secrets["XF_APICKEY"]
-                apisecret = st.secrets["XF_APISecret"]
-            except KeyError:
-                st.error("密钥配置缺失！")
+                api_key = st.secrets["XF_API_KEY"]
+                api_secret = st.secrets["XF_API_SECRET"]
+            except KeyError as e:
+                st.error(f"密钥配置缺失！请检查Secrets中是否存在 {e}")
                 st.stop()
 
             graph_ctx = search_graph_context(user_question)
@@ -204,6 +205,6 @@ elif menu == "🤖 AI智能问答":
                 st.write(graph_ctx)
 
             # 调用AI
-            answer = call_spark(appid, apikey, apisecret, graph_ctx, user_question)
+            answer = call_spark(appid, api_key, api_secret, graph_ctx, user_question)
             st.markdown("### ✅ AI 回答")
             st.write(answer)
