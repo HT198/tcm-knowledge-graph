@@ -5,7 +5,7 @@ import requests
 import json
 
 # 页面配置（和你之前的保持一致）
-st.set_page_config(page_title="中医药知识图谱+AI问答", layout="wide")
+st.set_page_config(page_title="中医药知识图谱", layout="wide")
 st.title("🌿 中医药知识图谱智能系统")
 
 # ---------------------- 1. 数据库连接（原封不动） ----------------------
@@ -85,28 +85,59 @@ def call_tongyi_api(api_key, graph_context, user_question):
 def search_graph_context(question):
     context = []
     with driver.session() as session:
-        entity_res = session.run("""
-            MATCH (n:Entity) WHERE n.id CONTAINS $kw RETURN n.id LIMIT 10
-        """, kw=question)
-        entity_list = [rec["n.id"] for rec in list(entity_res)]
-        if entity_list:
-            context.append(f"匹配实体：{', '.join(entity_list)}")
-        for entity in entity_list[:3]:
-            # 同时获取属性和关系，给AI更完整的信息
-            node_res = session.run("""
-                MATCH (n:Entity {id:$e}) RETURN n
-            """, e=entity)
-            node = list(node_res)[0]["n"]
-            props_str = ", ".join([f"{k}:{v}" for k, v in dict(node).items() if v])
-            context.append(f"{entity} 属性：{props_str}")
+        # 1. 第一步：从问题中提取关键词（简单拆分）
+        # 你问“寒疝腹痛用什么药”，这里会拆分出 ["寒疝腹痛", "寒疝", "腹痛", "药"]
+        keywords = [question]
+        for word in ["寒疝腹痛", "寒疝", "腹痛", "药", "治疗", "功效", "归经"]:
+            if word in question and word not in keywords:
+                keywords.append(word)
 
-            rel_res = session.run("""
-                MATCH (n:Entity{id:$e})-[r]-(m)
+        # 2. 第二步：模糊匹配相关实体（病症或药材）
+        entity_ids = set()
+        for kw in keywords:
+            res = session.run("""
+                MATCH (n:Entity) WHERE n.id CONTAINS $kw RETURN n.id LIMIT 10
+            """, kw=kw)
+            for rec in res:
+                entity_ids.add(rec["n.id"])
+        
+        entity_ids = list(entity_ids)
+        if entity_ids:
+            context.append(f"匹配到的实体：{', '.join(entity_ids)}")
+
+        # 3. 第三步：反向查询【治疗】关系（重点修复！）
+        # 这一步专门解决“什么药能治XX病”的问题
+        disease_ids = [id for id in entity_ids if "病" in id or "证" in id or "疝" in id or "痛" in id]
+        for disease in disease_ids:
+            # 查询能治疗该病症的所有药材
+            res = session.run("""
+                MATCH (m:Entity)-[r:治疗]->(d:Entity {id: $disease})
+                RETURN m.id, d.id, type(r) LIMIT 10
+            """, disease=disease)
+            for rec in res:
+                m, d, r = rec.values()
+                context.append(f"药材【{m}】->[{r}]-> 病症【{d}】")
+
+        # 4. 第四步：正向查询实体的属性和关系
+        for entity in entity_ids[:3]:
+            # 查询实体的详细属性（性味、归经、功能主治）
+            res = session.run("""
+                MATCH (n:Entity {id: $e}) RETURN n
+            """, e=entity)
+            node = list(res)[0]["n"]
+            props_str = ", ".join([f"{k}:{v}" for k, v in dict(node).items() if v])
+            if props_str:
+                context.append(f"{entity} 属性：{props_str}")
+
+            # 查询实体的所有关联关系
+            res = session.run("""
+                MATCH (n:Entity {id: $e})-[r]-(m)
                 RETURN n.id, type(r), m.id LIMIT 10
             """, e=entity)
-            for rec in list(rel_res):
+            for rec in res:
                 s, r, t = rec.values()
                 context.append(f"{s} —{r}→ {t}")
+
     return "\n".join(context) if context else "知识图谱中未查询到相关信息"
 
 # ---------------------- 6. 页面菜单（在原有基础上加AI问答） ----------------------
