@@ -1,15 +1,14 @@
 import streamlit as st
 from neo4j import GraphDatabase
 import pandas as pd
-from langchain_openai import ChatOpenAI
-from langchain.prompts import PromptTemplate
-from langchain.chains import LLMChain
+import requests
+import json
 
-# 页面基础配置
+# 页面配置
 st.set_page_config(page_title="中医药知识图谱+AI问答", layout="wide")
-st.title("🌿 中医药知识图谱智能系统（AI版）")
+st.title("🌿 中医药知识图谱智能系统（云端大模型版）")
 
-# ---------------------- 1. 连接Neo4j数据库 ----------------------
+# ---------------------- 1. Neo4j 数据库连接 ----------------------
 @st.cache_resource
 def init_driver():
     uri = "neo4j+s://cb5cc04e.databases.neo4j.io"
@@ -19,23 +18,16 @@ def init_driver():
 
 driver = init_driver()
 
-# ---------------------- 2. 初始化大模型（从Secrets读取密钥） ----------------------
-@st.cache_resource
-def init_llm_chain():
-    # 从Streamlit密钥读取API Key，安全不泄露
-    api_key = st.secrets["DASHSCOPE_API_KEY"]
-    llm = ChatOpenAI(
-        model="qwen-turbo",
-        api_key=api_key,
-        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
-        temperature=0.3,
-        max_tokens=2000
-    )
-    prompt = PromptTemplate(
-        input_variables=["graph_context", "user_question"],
-        template="""
-你是专业中医药顾问，请严格依据【知识图谱检索结果】回答问题。
-如果没有相关信息，请如实说明，严禁编造内容。
+# ---------------------- 2. 大模型API调用（原生requests，无langchain依赖） ----------------------
+def call_tongyi_api(api_key, graph_context, user_question):
+    """直接用requests调用通义千问API"""
+    url = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+    prompt = f"""你是专业的中医药顾问，请严格依据下方【知识图谱检索结果】回答用户问题。
+如果图谱中无相关信息，请如实告知，不要编造内容。
 
 【知识图谱检索结果】：
 {graph_context}
@@ -43,12 +35,23 @@ def init_llm_chain():
 【用户问题】：
 {user_question}
 
-请用通俗、条理清晰的语言作答：
+请用通俗易懂的中文回答，分点说明更佳：
 """
-    )
-    return LLMChain(llm=llm, prompt=prompt)
-
-llm_chain = init_llm_chain()
+    payload = {
+        "model": "qwen-turbo",
+        "input": {
+            "messages": [
+                {"role": "user", "content": prompt}
+            ]
+        },
+        "parameters": {
+            "temperature": 0.3,
+            "max_tokens": 2000
+        }
+    }
+    response = requests.post(url, headers=headers, data=json.dumps(payload))
+    response.raise_for_status()
+    return response.json()["output"]["text"]
 
 # ---------------------- 3. 原有图谱查询函数 ----------------------
 def get_entity_info(entity_name):
@@ -64,7 +67,7 @@ def get_entity_info(entity_name):
             MATCH (n:Entity {id: $name})-[r]-(m)
             RETURN type(r) AS 关系类型, m.id AS 关联实体
         """, name=entity_name)
-        rel_list = list(res)
+        rel_list = list(res_rel)
         relations = [rec.data() for rec in rel_list]
     return props, relations
 
@@ -143,10 +146,16 @@ elif menu == "🤖 AI智能问答":
     user_question = st.text_area("请输入问题", placeholder="例如：丁香可以治疗哪些病症？", height=100)
     if st.button("开始问答", type="primary") and user_question.strip():
         with st.spinner("正在检索图谱并思考..."):
+            # 1. 从Secrets读取API Key
+            api_key = st.secrets["DASHSCOPE_API_KEY"]
+            # 2. 检索知识图谱
             graph_ctx = search_graph_context(user_question)
             with st.expander("📚 知识图谱检索详情", expanded=False):
                 st.write(graph_ctx)
-            # 调用大模型
-            answer = llm_chain.invoke({"graph_context": graph_ctx, "user_question": user_question})["text"]
-            st.markdown("### ✅ AI 回答")
-            st.write(answer)
+            # 3. 调用通义千问API
+            try:
+                answer = call_tongyi_api(api_key, graph_ctx, user_question)
+                st.markdown("### ✅ AI 回答")
+                st.write(answer)
+            except Exception as e:
+                st.error(f"调用大模型失败：{str(e)}")
