@@ -17,7 +17,7 @@ def init_driver():
 
 driver = init_driver()
 
-# ===================== 原有功能函数（无修改） =====================
+# ===================== 原有功能函数 =====================
 def get_entity_info(entity_name):
     """查询实体属性+关联关系"""
     with driver.session() as session:
@@ -52,7 +52,7 @@ def query_herbs_for_disease(disease_name):
         data = [rec.data() for rec in records]
         return pd.DataFrame(data)
 
-# ===================== 通用图谱检索函数（全实体+全关系，通用版） =====================
+# ===================== 通用图谱检索函数 =====================
 def search_graph_context(question):
     context = []
     # 过滤无用助词
@@ -86,17 +86,15 @@ def search_graph_context(question):
 
             # 2. 遍历实体：属性 + 所有关系
             for entity_id in entity_ids[:3]:
-                # 实体属性
                 res_node = session.run("MATCH (n:Entity {id: $id}) RETURN n", id=entity_id)
                 node = list(res_node)[0]["n"]
                 props_str = ", ".join([f"{k}:{v}" for k, v in dict(node).items() if v])
                 if props_str:
                     context.append(f"📋 {entity_id} 属性：{props_str}")
 
-                # 实体所有进出关系
                 res_rel = session.run("""
                     MATCH (a:Entity)-[r]-(b:Entity)
-                    WHERE a.id = $id OR b.id = $id
+                    WHERE a.id = $id OR b.id
                     RETURN a.id, type(r), b.id
                 """, id=entity_id)
                 for rec in res_rel:
@@ -116,12 +114,11 @@ def search_graph_context(question):
 
     return "\n".join(context) if context else "知识图谱中未查询到相关信息"
 
-# ===================== 智谱 GLM-4-Flash 免费API调用 =====================
-def call_zhipu_api(api_key, graph_context, user_question):
+# ===================== 智谱 GLM-4-Flash 接口（修复鉴权） =====================
+def call_zhipu_api(app_id, app_secret, graph_context, user_question):
     url = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
     headers = {"Content-Type": "application/json"}
 
-    # 强制约束提示词，杜绝编造
     system_prompt = """你是专业中医药顾问，严格遵守规则：
 1. 只依据【知识图谱检索结果】回答问题；
 2. 图谱有内容就如实总结，绝对不要编造图谱以外的药材、方剂、知识；
@@ -138,12 +135,13 @@ def call_zhipu_api(api_key, graph_context, user_question):
         "model": "glm-4-flash",
         "messages": [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_content}
+            {"role": "user", "content"}
         ],
         "temperature": 0.3
     }
 
-    response = requests.post(url, headers=headers, json=payload, auth=(api_key, ""))
+    # 正确传参：auth=(app_id, app_secret)
+    response = requests.post(url, headers=headers, json=payload, auth=(app_id, app_secret))
     response.raise_for_status()
     return response.json()["choices"][0]["message"]["content"]
 
@@ -190,16 +188,16 @@ elif menu == "🤖 AI智能问答":
 
     if st.button("开始问答", type="primary") and user_question.strip():
         with st.spinner("正在检索图谱并思考..."):
-            # 读取密钥（从Secrets获取，安全不泄露）
-            api_key = st.secrets["ZHIPU_API_KEY"]
-            # 检索图谱
+            # 从Secrets读取拆分后的密钥
+            app_id = st.secrets["ZHIPU_APP_ID"]
+            app_secret = st.secrets["ZHIPU_APP_SECRET"]
+            
             graph_ctx = search_graph_context(user_question)
-            # 展示图谱原始数据
             with st.expander("📚 知识图谱检索详情", expanded=False):
                 st.write(graph_ctx)
-            # 调用大模型
+            
             try:
-                answer = call_zhipu_api(api_key, graph_ctx, user_question)
+                answer = call_zhipu_api(app_id, app_secret, graph_ctx, user_question)
                 st.markdown("### ✅ AI 回答")
                 st.write(answer)
             except Exception as e:
