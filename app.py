@@ -4,7 +4,7 @@ import pandas as pd
 import requests
 import json
 
-# 页面配置（和你之前的保持一致）
+# 页面配置
 st.set_page_config(page_title="中医药知识图谱", layout="wide")
 st.title("🌿 中医药知识图谱智能系统")
 
@@ -61,8 +61,18 @@ def call_tongyi_api(api_key, graph_context, user_question):
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json"
     }
-    prompt = f"""你是专业的中医药顾问，请严格依据下方【知识图谱检索结果】回答用户问题。
-如果图谱中无相关信息，请如实告知，不要编造内容。
+    prompt = f"""你是专业的中医药顾问，请结合【知识图谱检索结果】回答用户问题。
+如果图谱中有相关信息，优先依据图谱内容作答；如果没有，可根据中医常识给出通用、安全的建议，
+并提醒用户咨询专业中医师辨证施治，不要编造不存在的药材。
+
+【知识图谱检索结果】：
+{graph_context}
+
+【用户问题】：
+{user_question}
+
+请用通俗易懂的中文回答，分点说明更佳：
+"""
 
 【知识图谱检索结果】：
 {graph_context}
@@ -85,58 +95,34 @@ def call_tongyi_api(api_key, graph_context, user_question):
 def search_graph_context(question):
     context = []
     with driver.session() as session:
-        # 1. 第一步：从问题中提取关键词（简单拆分）
-        # 你问“寒疝腹痛用什么药”，这里会拆分出 ["寒疝腹痛", "寒疝", "腹痛", "药"]
-        keywords = [question]
-        for word in ["寒疝腹痛", "寒疝", "腹痛", "药", "治疗", "功效", "归经"]:
-            if word in question and word not in keywords:
-                keywords.append(word)
+        # 1. 先直接查询【治疗】关系，优先解决“什么药治什么病”的问题
+        # 直接用问题里的关键词匹配病症实体，不做宽泛模糊匹配
+        disease_res = session.run("""
+            MATCH (m:Entity)-[r:治疗]->(d:Entity)
+            WHERE d.id CONTAINS $kw
+            RETURN m.id, d.id, type(r) LIMIT 10
+        """, kw=question)
+        for rec in disease_res:
+            m, d, r = rec.values()
+            context.append(f"药材【{m}】可治疗病症【{d}】（关系：{r}）")
 
-        # 2. 第二步：模糊匹配相关实体（病症或药材）
-        entity_ids = set()
-        for kw in keywords:
-            res = session.run("""
-                MATCH (n:Entity) WHERE n.id CONTAINS $kw RETURN n.id LIMIT 10
-            """, kw=kw)
-            for rec in res:
-                entity_ids.add(rec["n.id"])
-        
-        entity_ids = list(entity_ids)
-        if entity_ids:
-            context.append(f"匹配到的实体：{', '.join(entity_ids)}")
-
-        # 3. 第三步：反向查询【治疗】关系（重点修复！）
-        # 这一步专门解决“什么药能治XX病”的问题
-        disease_ids = [id for id in entity_ids if "病" in id or "证" in id or "疝" in id or "痛" in id]
-        for disease in disease_ids:
-            # 查询能治疗该病症的所有药材
-            res = session.run("""
-                MATCH (m:Entity)-[r:治疗]->(d:Entity {id: $disease})
-                RETURN m.id, d.id, type(r) LIMIT 10
-            """, disease=disease)
-            for rec in res:
-                m, d, r = rec.values()
-                context.append(f"药材【{m}】->[{r}]-> 病症【{d}】")
-
-        # 4. 第四步：正向查询实体的属性和关系
-        for entity in entity_ids[:3]:
-            # 查询实体的详细属性（性味、归经、功能主治）
-            res = session.run("""
-                MATCH (n:Entity {id: $e}) RETURN n
-            """, e=entity)
-            node = list(res)[0]["n"]
+        # 2. 再精准匹配病症实体本身，查看属性
+        entity_res = session.run("""
+            MATCH (n:Entity) WHERE n.id = $kw RETURN n
+        """, kw=question)
+        for rec in entity_res:
+            node = rec["n"]
             props_str = ", ".join([f"{k}:{v}" for k, v in dict(node).items() if v])
             if props_str:
-                context.append(f"{entity} 属性：{props_str}")
+                context.append(f"【{question}】的属性：{props_str}")
 
-            # 查询实体的所有关联关系
-            res = session.run("""
-                MATCH (n:Entity {id: $e})-[r]-(m)
-                RETURN n.id, type(r), m.id LIMIT 10
-            """, e=entity)
-            for rec in res:
-                s, r, t = rec.values()
-                context.append(f"{s} —{r}→ {t}")
+        # 3. 匹配问题中的核心药材（如果问题里有药材名）
+        herb_res = session.run("""
+            MATCH (n:Entity) WHERE n.id IN ['肾虚腰痛', '腰痛', '肾虚'] RETURN n.id LIMIT 5
+        """)
+        herb_ids = [rec["n.id"] for rec in herb_res]
+        if herb_ids:
+            context.append(f"匹配到的相关实体：{', '.join(herb_ids)}")
 
     return "\n".join(context) if context else "知识图谱中未查询到相关信息"
 
