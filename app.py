@@ -13,9 +13,9 @@ st.title("🌿 中医药知识图谱智能系统")
 # ===================== Neo4j 数据库连接 =====================
 @st.cache_resource
 def init_driver():
-    uri = "neo4j+s://cb5cc04e.databases.neo4j.io"
-    user = "cb5cc04e"
-    pwd = "uzjqMbskUGdIObBV0uRRs6AoTO8gpmetKkHyhd3vuhs"
+    uri = st.secrets["neo4j_uri"]
+    user = st.secrets["neo4j_user"]
+    pwd = st.secrets["neo4j_password"]
     return GraphDatabase.driver(uri, auth=(user, pwd))
 
 driver = init_driver()
@@ -32,7 +32,7 @@ def get_entity_info(entity_name):
         props = {}
         for key, val in dict(node).items():
             if val is not None and val != "":
-                props[key]
+                props[key] = val
 
         res_rel = session.run("""
             MATCH (n:Entity {id: $name})-[r]-(m)
@@ -110,23 +110,36 @@ def search_graph_context(question):
 
     return "\n".join(context) if context else "知识图谱中未查询到相关信息"
 
-# ===================== 讯飞星火Lite 调用 =====================
+# ===================== 讯飞星火 API 调用 =====================
 def call_spark(appid, apikey, apisecret, graph_context, user_question):
     url = "https://spark-api.xf-yun.com/v1.1/chat"
     host = "spark-api.xf-yun.com"
     path = "/v1.1/chat"
     timestamp = str(int(time.time()))
-    # 签名
-    tmp = apikey + timestamp
-    md5_val = hashlib.md5(tmp.encode("utf-8")).hexdigest()
+    
+    # 生成签名
+    md5 = hashlib.md5()
+    md5.update((apikey + timestamp).encode("utf-8"))
+    checksum = md5.hexdigest()
     auth = base64.b64encode(f"{appid}:{apisecret}".encode()).decode()
+
     headers = {
-        "Authorization": f"Bearer {auth},{timestamp},{md5}",
+        "Authorization": f"Bearer {auth},{timestamp},{checksum}",
         "Content-Type": "application/json",
         "Host": host
     }
-    system_prompt = """你是专业中医药顾问，仅依据知识图谱内容回答，禁止编造，无数据请建议就医。"""
-    full_text = f"""【知识图谱】{graph_context}\n【问题】{user_question}"""
+
+    system_prompt = """你是专业中医药顾问，严格按照要求作答：
+1. 仅依据【知识图谱检索结果】内容回答，禁止编造任何图谱外药材、方剂、知识；
+2. 图谱无相关信息，请如实说明，并建议咨询专业中医师；
+3. 回答通俗易懂、条理清晰。"""
+
+    full_text = f"""【知识图谱检索结果】
+{graph_context}
+
+【用户问题】
+{user_question}"""
+
     payload = {
         "header": {"app_id": appid},
         "parameter": {"chat": {"domain": "lite", "temperature": 0.3}},
@@ -139,9 +152,10 @@ def call_spark(appid, apikey, apisecret, graph_context, user_question):
             }
         }
     }
-    res = requests.post(url, headers=headers, json=payload, timeout=20)
-    res.raise_for_status()
-    return res.json()["payload"]["choices"]["text"][0]["content"]
+
+    response = requests.post(url, headers=headers, json=payload, timeout=25)
+    response.raise_for_status()
+    return response.json()["payload"]["choices"]["text"][0]["content"]
 
 # ===================== 页面交互 =====================
 menu = st.sidebar.selectbox(
@@ -186,17 +200,25 @@ elif menu == "🤖 AI智能问答":
 
     if st.button("开始问答", type="primary") and user_question.strip():
         with st.spinner("正在检索图谱并思考..."):
-            appid = st.secrets["XF_APPID"]
-            apikey = st.secrets["XF_APICKEY"]
-            apisecret = st.secrets["XF_APISecret"]
-            graph_ctx = search_graph_context(user_question)
+            # 读取密钥并捕获异常
+            try:
+                appid = st.secrets["XF_APPID"]
+                apikey = st.secrets["XF_APIKEY"]
+                apisecret = st.secrets["XF_APISecret"]
+            except KeyError:
+                st.error("密钥配置缺失，请检查Secrets")
+                st.stop()
 
+            graph_ctx = search_graph_context(user_question)
             with st.expander("📚 知识图谱检索详情", expanded=False):
                 st.write(graph_ctx)
 
+            # 调用讯飞接口 + 异常捕获
             try:
                 answer = call_spark(appid, apikey, apisecret, graph_ctx, user_question)
                 st.markdown("### ✅ AI 回答")
                 st.write(answer)
+            except requests.exceptions.RequestException:
+                st.error("接口请求超时/网络异常，请稍后重试")
             except Exception as e:
-                st.error(f"调用大模型失败：{str(e)}")
+                st.error(f"调用AI失败：{str(e)}")
