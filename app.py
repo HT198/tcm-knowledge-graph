@@ -56,6 +56,19 @@ def query_herbs_for_disease(disease_name):
         data = [rec.data() for rec in records]
         return pd.DataFrame(data)
 
+# 新增：全局模糊查询函数（支持药材/病症模糊匹配）
+def fuzzy_search_all(keyword):
+    with driver.session() as session:
+        cypher = """
+        MATCH (n:Entity)
+        WHERE n.id CONTAINS $kw
+        RETURN DISTINCT n.id AS 实体名称 LIMIT 50
+        """
+        res = session.run(cypher, kw=keyword)
+        records = list(res)
+        data = [rec.data() for rec in records]
+        return pd.DataFrame(data)
+
 # ---------------------- 4. 大模型调用函数（新增，不影响原有功能） ----------------------
 def call_tongyi_api(api_key, graph_context, user_question):
     url = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation"
@@ -160,23 +173,76 @@ menu = st.sidebar.selectbox(
 )
 
 # 实体查询页面（修复后）
+# 实体查询页面（改造：增加模板按钮 + 模糊查询）
 if menu == "实体查询":
-    st.subheader("📌 药材/实体查询")
-    entity_name = st.text_input("输入实体名称（如：丁香）", "丁香")
-    if st.button("查询"):
-        props, relations = get_entity_info(entity_name)
-        if props is None:
-            st.warning("未找到该实体，请检查名称是否正确")
-        else:
-            st.markdown("### 基本属性")
-            # 只显示有数据的属性，不会再出现 None
-            st.dataframe(pd.DataFrame(list(props.items()), columns=["属性", "值"]), use_container_width=True)
-            if relations:
-                st.markdown("### 关联关系")
-                st.dataframe(pd.DataFrame(relations), use_container_width=True)
-            else:
-                st.info("该实体暂无关联关系")
+    st.subheader("📌 药材/病症 模板查询 & 模糊检索")
+    # 统一输入框
+    input_text = st.text_input("请输入药材/病症名称（支持模糊关键词，例：香、腹痛）", value="丁香")
+    st.divider()
 
+    # ========== 两行三列 功能按钮组 ==========
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        btn_entity_info = st.button("查询实体完整属性")
+    with col2:
+        btn_entity_relation = st.button("查询实体关联关系")
+    with col3:
+        btn_drug_treat = st.button("该药材可治病症")
+
+    col4, col5, col6 = st.columns(3)
+    with col4:
+        btn_disease_drug = st.button("该病症对应药材")
+    with col5:
+        btn_fuzzy = st.button("🔍 全局模糊检索")
+    with col6:
+        btn_clear = st.button("清空结果")
+
+    st.divider()
+    # 结果容器
+    result_props = None
+    result_rels = None
+    result_fuzzy = None
+
+    # 按钮事件逻辑
+    if btn_entity_info and input_text.strip():
+        result_props, _ = get_entity_info(input_text)
+    elif btn_entity_relation and input_text.strip():
+        _, result_rels = get_entity_info(input_text)
+    elif btn_drug_treat and input_text.strip():
+        result_fuzzy = query_herbs_for_disease(input_text)
+    elif btn_disease_drug and input_text.strip():
+        result_fuzzy = query_herbs_for_disease(input_text)
+    elif btn_fuzzy and input_text.strip():
+        result_fuzzy = fuzzy_search_all(input_text)
+    elif btn_clear:
+        result_props = None
+        result_rels = None
+        result_fuzzy = None
+        st.info("✅ 已清空所有查询结果")
+
+    # ========== 结果展示区 ==========
+    # 1. 实体属性展示
+    if result_props is not None:
+        st.markdown("### 基本属性")
+        st.dataframe(pd.DataFrame(list(result_props.items()), columns=["属性", "值"]), use_container_width=True)
+    # 2. 关联关系展示
+    if result_rels is not None:
+        st.markdown("### 关联关系")
+        if result_rels:
+            st.dataframe(pd.DataFrame(result_rels), use_container_width=True)
+        else:
+            st.info("该实体暂无关联关系")
+    # 3. 模糊查询/病症找药结果展示
+    if result_fuzzy is not None:
+        if result_fuzzy.empty:
+            st.warning("⚠️ 未查询到相关数据，请更换关键词重试")
+        else:
+            st.success(f"✅ 共查询到 {len(result_fuzzy)} 条结果")
+            st.dataframe(result_fuzzy, use_container_width=True)
+
+    # 空输入校验
+    if not input_text.strip() and (btn_entity_info or btn_entity_relation or btn_fuzzy):
+        st.warning("⚠️ 请先输入查询内容！")
 # 病症找药页面（不变）
 elif menu == "病症找药":
     st.subheader("💊 根据病症查询推荐药材")
