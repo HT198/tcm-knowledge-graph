@@ -131,43 +131,46 @@ def call_tongyi_api(api_key, graph_context, user_question):
 
 # ---------------------- 5. 图谱上下文检索 ----------------------
 def search_graph_context(question):
-    stop_words = ["用什么", "什么药", "检测", "治疗", "含有", "属于"]
-    for word in stop_words:
-        question = question.replace(word, "")
+    """优化图谱上下文检索，适配自然问句，提升匹配率"""
     context = []
+    # 统一清理文本
+    q_clean = question.replace("？", "").strip()
     with driver.session() as session:
-        # 从问题中提取关键词
-        keywords = []
-        for token in question.replace("？", "").replace("用什么", "").replace("什么药", "").split():
-            if len(token) > 1:  # 过滤掉单字虚词
-                keywords.append(token)
-        keywords.append(question)
+        # 1. 直接用原始问句整体模糊匹配（优先命中完整实体）
+        cypher_all = """
+        MATCH (n:Entity)
+        WHERE n.id CONTAINS $text
+        RETURN DISTINCT n.id
+        """
+        res_all = session.run(cypher_all, text=q_clean)
+        entity_ids = [rec["n.id"] for rec in res_all]
 
-        # 匹配所有相关实体
-        entity_ids = set()
-        for kw in keywords:
-            res = session.run("""
-                MATCH (n:Entity)
-                WHERE n.id = $kw OR n.id CONTAINS $kw
-                RETURN n.id
-            """, kw=kw)
-            for rec in res:
-                entity_ids.add(rec["n.id"])
-        
-        entity_ids = list(entity_ids)
+        if not entity_ids:
+            # 2. 整体没匹配到，拆分简单关键词（精简分词，只取有效词）
+            keywords = [word for word in q_clean.split() if len(word) >= 1]
+            entity_ids = set()
+            for kw in keywords:
+                res = session.run("""
+                    MATCH (n:Entity)
+                    WHERE n.id CONTAINS $kw
+                    RETURN DISTINCT n.id
+                """, kw=kw)
+                for rec in res:
+                    entity_ids.add(rec["n.id"])
+            entity_ids = list(entity_ids)
+
+        # 3. 遍历匹配到的实体，拼接属性+关系
         if entity_ids:
             context.append(f"✅ 匹配到的实体：{', '.join(entity_ids)}")
-
-            # 提取实体属性与关系
-            for entity_id in entity_ids[:3]:  # 取前3个，避免上下文过长
-                res = session.run("""
-                    MATCH (n:Entity {id: $id}) RETURN n
-                """, id=entity_id)
-                node = list(res)[0]["n"]
+            for entity_id in entity_ids[:3]:
+                # 查询实体属性
+                res_node = session.run("MATCH (n:Entity {id: $id}) RETURN n", id=entity_id)
+                node = list(res_node)[0]["n"]
                 props_str = ", ".join([f"{k}:{v}" for k, v in dict(node).items() if v])
                 if props_str:
                     context.append(f"📋 {entity_id} 属性：{props_str}")
 
+                # 查询所有关联关系
                 res_rel = session.run("""
                     MATCH (a:Entity)-[r]-(b:Entity)
                     WHERE a.id = $id OR b.id = $id
@@ -175,21 +178,22 @@ def search_graph_context(question):
                 """, id=entity_id)
                 for rec in res_rel:
                     s, r, t = rec.values()
-                    context.append(f"🔗 图谱关系：{s} —[{r}]→ {t}")
+                    context.append(f"🔗 {s} —[{r}]→ {t}")
 
-        # 反向匹配关系
-        for kw in keywords:
-            res = session.run("""
+        # 兜底：按关键词匹配全局关系
+        for kw in q_clean.split():
+            if len(kw) < 1:
+                continue
+            res_rel = session.run("""
                 MATCH (s:Entity)-[r]->(t:Entity)
                 WHERE s.id CONTAINS $kw OR t.id CONTAINS $kw
                 RETURN s.id, type(r), t.id
             """, kw=kw)
-            for rec in res:
+            for rec in res_rel:
                 s, r, t = rec.values()
                 context.append(f"🔍 关联关系：{s} —[{r}]→ {t}")
 
     return "\n".join(context) if context else "知识图谱中未查询到相关信息"
-
 # ---------------------- 6. 页面菜单 ----------------------
 menu = st.sidebar.selectbox(
     "功能菜单",
