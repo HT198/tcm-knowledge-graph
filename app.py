@@ -5,26 +5,30 @@ import requests
 import json
 
 # 页面配置
-st.set_page_config(page_title="中医药知识图谱+AI问答", layout="wide")
+st.set_page_config(page_title="中医药知识图谱", layout="wide")
 st.title("🌿 中医药知识图谱智能系统")
 
 # ---------------------- 1. 数据库连接 ----------------------
+# ---------------------- 新版云端适配数据库连接（修复路由参数冲突） ----------------------
 def get_db_session():
-    """适配Streamlit Cloud + Neo4j Aura，解决DNS解析/断连问题"""
-    # 协议改为 neo4j:// 直连，规避+s路由DNS解析失败
-    uri = "neo4j://cb5cc04e.databases.neo4j.io"
-    user = "cb5cc04e"
-    pwd = "uzjqMbskUGdIObBV0uRRs6AoTO8gpmetKkHyhd3vuhs"
+    """适配Streamlit Cloud + Neo4j Aura，解决参数冲突与连接问题"""
+    try:
+        uri = "neo4j://cb5cc04e.databases.neo4j.io"
+        user = "cb5cc04e"
+        pwd = "uzjqMbskUGdIObBV0uRRs6AoTO8gpmetKkHyhd3vuhs"
 
-    driver = GraphDatabase.driver(
-        uri,
-        auth=(user, pwd),
-        database="neo4j",          # Aura 强制指定默认数据库
-        connection_timeout=20,     # 延长云端网络超时时间
-        max_connection_lifetime=300,
-        routing_context={"routing.enabled": False}  # 关闭路由，彻底解决DNS报错
-    )
-    return driver.session()
+        # 移除 routing_context，彻底解决参数重复报错
+        driver = GraphDatabase.driver(
+            uri,
+            auth=(user, pwd),
+            database="neo4j",       # Aura 必须指定默认库
+            connection_timeout=20,  # 延长云端超时
+            max_connection_lifetime=300
+        )
+        return driver.session()
+    except Exception as e:
+        st.error(f"数据库连接失败：{str(e)}")
+        return None
 
 # ---------------------- 2. 修复后的实体查询函数（正确显示属性） ----------------------
 def get_entity_info(entity_name):
