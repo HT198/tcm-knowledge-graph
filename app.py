@@ -29,7 +29,7 @@ def get_entity_info(entity_name):
             return None, None
         
         node = records[0]["n"]
-        # 核心修复：过滤掉空值，只保留有数据的属性，不会再显示 None
+        # 过滤掉空值，只保留有数据的属性，不会再显示 None
         props = {}
         for key, val in dict(node).items():
             if val is not None and val != "":
@@ -44,8 +44,8 @@ def get_entity_info(entity_name):
         relations = [rec.data() for rec in rel_list]
     return props, relations
 
-# ---------------------- 3. 查询函数（区分双向关系） ----------------------
-# 药材 -> 可治疗病症（实体页专用，修复关系方向）
+# ---------------------- 3. 查询函数 ----------------------
+# 药材 -> 可治疗病症
 def query_disease_by_herb(herb_name):
     with driver.session() as session:
         res = session.run("""
@@ -57,7 +57,7 @@ def query_disease_by_herb(herb_name):
         data = [rec.data() for rec in records]
         return pd.DataFrame(data)
 
-# 病症 -> 对应药材（病症找药页专用）
+# 病症 -> 对应药材
 def query_herbs_for_disease(disease_name):
     with driver.session() as session:
         res = session.run("""
@@ -69,7 +69,7 @@ def query_herbs_for_disease(disease_name):
         data = [rec.data() for rec in records]
         return pd.DataFrame(data)
 
-# 全局模糊查询（实体页使用，修复NameError）
+# ---------------------- 4.全局模糊查询 ----------------------
 def fuzzy_search_all(keyword):
     try:
         with driver.session() as session:
@@ -85,7 +85,7 @@ def fuzzy_search_all(keyword):
     except Exception:
         return pd.DataFrame()
 
-# ========= 新增：病症专属模糊查询（模糊病症 + 对应治疗药材）=========
+# ---------------------- 5.病症专属模糊查询 ----------------------
 def fuzzy_disease_with_herb(keyword):
     with driver.session() as session:
         cypher = """
@@ -98,7 +98,7 @@ def fuzzy_disease_with_herb(keyword):
         data = [rec.data() for rec in records]
         return pd.DataFrame(data)
 
-# ---------------------- 4. 大模型调用函数 ----------------------
+# ---------------------- 6.大模型调用函数 ----------------------
 def call_tongyi_api(api_key, graph_context, user_question):
     url = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation"
     headers = {
@@ -129,16 +129,16 @@ def call_tongyi_api(api_key, graph_context, user_question):
     response.raise_for_status()
     return response.json()["output"]["text"]
 
-# ---------------------- 5. 图谱上下文检索 ----------------------
+# ---------------------- 7.图谱上下文检索 ----------------------
 def search_graph_context(question):
     context = []
     q_clean = question.replace("？", "").replace("什么是", "").replace("是什么", "").strip()
     with driver.session() as session:
-        # 第一步：提取所有2字及以上有效名词片段，过滤虚词
+        # 提取所有2字及以上有效名词片段，过滤虚词
         import re
         # 提取中文实词
         words = re.findall(r'[\u4e00-\u9fa5]{2,}', q_clean)
-        # 兜底单字药材（如无多字词）
+        # 兜底单字药材
         single_chars = re.findall(r'[\u4e00-\u9fa5]', q_clean)
         keywords = list(set(words + single_chars))
 
@@ -191,7 +191,7 @@ menu = st.sidebar.selectbox(
     ["实体查询", "病症找药", "🤖 AI智能问答"]
 )
 
-# 实体查询页面（移除【该病症对应药材】按钮）
+# 实体查询页面
 if menu == "实体查询":
     st.subheader("📌 药材/病症 查询")
     # 统一输入框
@@ -259,7 +259,7 @@ if menu == "实体查询":
     if not input_text.strip() and (btn_entity_info or btn_entity_relation or btn_fuzzy):
         st.warning("⚠️ 请先输入查询内容！")
 
-# 病症找页面（新增模糊查询按钮）
+# 病症找页面
 elif menu == "病症找药":
     st.subheader("💊 根据病症查询推荐药材")
     disease = st.text_input("输入病症名称")
@@ -283,7 +283,7 @@ elif menu == "病症找药":
             st.success(f"找到{len(df_result)}种相关药材")
             st.dataframe(df_result, use_container_width=True)
 
-# AI智能问答页面（完全不变）
+# AI智能问答页面
 elif menu == "🤖 AI智能问答":
     st.subheader("🤖 AI智能问答")
     user_question = st.text_area("请输入问题", height=100)
