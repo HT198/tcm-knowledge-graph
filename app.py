@@ -193,9 +193,9 @@ menu = st.sidebar.selectbox(
 
 # 实体查询页面（移除【该病症对应药材】按钮）
 if menu == "实体查询":
-    st.subheader("📌 药材/病症 模板查询 & 模糊检索")
+    st.subheader("📌 药材/病症 查询")
     # 统一输入框
-    input_text = st.text_input("请输入药材/病症名称（支持模糊关键词，例：香、腹痛）", value="丁香")
+    input_text = st.text_input("请输入药材/病症名称")
     st.divider()
 
     # 两行布局，移除原第六个按钮，保留5个按钮
@@ -262,7 +262,7 @@ if menu == "实体查询":
 # 病症找页面（新增模糊查询按钮）
 elif menu == "病症找药":
     st.subheader("💊 根据病症查询推荐药材")
-    disease = st.text_input("输入病症名称（支持模糊关键词，例：肾虚、腹痛）", "肾虚阳痿")
+    disease = st.text_input("输入病症名称")
     st.divider()
     col1, col2 = st.columns(2)
     with col1:
