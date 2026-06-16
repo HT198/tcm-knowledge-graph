@@ -286,8 +286,7 @@ elif menu == "病症找药":
 # AI智能问答页面（完全不变）
 elif menu == "🤖 AI智能问答":
     st.subheader("🤖 AI智能问答")
-    st.info("结合知识图谱回答药材、病症相关问题，不编造内容")
-    user_question = st.text_area("请输入问题", placeholder="例如：丁香的性味归经是什么？可以治疗哪些病症？", height=100)
+    user_question = st.text_area("请输入问题", height=100)
     if st.button("开始问答", type="primary") and user_question.strip():
         with st.spinner("正在检索图谱并思考..."):
             api_key = st.secrets["DASHSCOPE_API_KEY"]
