@@ -129,6 +129,28 @@ def call_tongyi_api(api_key, graph_context, user_question):
     response.raise_for_status()
     return response.json()["output"]["text"]
 
+# ========= 纯大模型问答（不读取Neo4j图谱，仅通用中医药回答） =========
+def call_raw_llm(api_key, user_question):
+    url = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+    prompt = f"""你是资深中医药科普专家，无数据库限制，可依托通用中医药知识库自由作答。
+允许完整科普药材、病症、方剂、养生知识，无需限制图谱数据，回答通俗易懂，条理清晰。
+若涉及用药建议，末尾统一标注：中药使用请遵循专业中医师指导，请勿自行抓药服用。
+
+用户提问：{user_question}
+"""
+    payload = {
+        "model": "qwen-turbo",
+        "input": {"messages": [{"role": "user", "content": prompt}]},
+        "parameters": {"temperature": 0.7, "max_tokens": 2000}
+    }
+    response = requests.post(url, headers=headers, data=json.dumps(payload))
+    response.raise_for_status()
+    return response.json()["output"]["text"]
+
 # ---------------------- 7.图谱上下文检索 ----------------------
 def search_graph_context(question):
     context = []
@@ -185,7 +207,7 @@ def search_graph_context(question):
                 context.append(f"🔍 关联关系：{s} —[{r}]→ {t}")
 
     return "\n".join(context) if context else "知识图谱中未查询到相关信息"
-# ---------------------- 6. 页面菜单 ----------------------
+# ---------------------- 8. 页面菜单 ----------------------
 menu = st.sidebar.selectbox(
     "功能菜单",
     ["实体查询", "病症找药", "🤖 AI智能问答"]
@@ -299,3 +321,16 @@ elif menu == "🤖 AI智能问答":
                 st.write(answer)
             except Exception as e:
                 st.error(f"调用大模型失败：{str(e)}")
+elif menu == "✨ 纯大模型问答":
+    st.subheader("✨ 纯大模型通用问答")
+    st.info("不受图谱数据限制，可自由科普各类中医药知识，适合宽泛科普提问")
+    raw_question = st.text_area("输入你的中医药问题", height=100)
+    if st.button("直接生成回答", type="primary") and raw_question.strip():
+        with st.spinner("大模型正在生成科普回答..."):
+            try:
+                api_key = st.secrets["DASHSCOPE_API_KEY"]
+                raw_ans = call_raw_llm(api_key, raw_question)
+                st.markdown("### 📖 纯模型科普回答")
+                st.write(raw_ans)
+            except Exception as e:
+                st.error(f"大模型调用失败：{str(e)}")
