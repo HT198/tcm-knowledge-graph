@@ -69,7 +69,23 @@ def query_herbs_for_disease(disease_name):
         data = [rec.data() for rec in records]
         return pd.DataFrame(data)
 
-# 新增：全局模糊查询函数（支持药材/病症模糊匹配）
+# 全局模糊查询（实体页使用，修复NameError）
+def fuzzy_search_all(keyword):
+    try:
+        with driver.session() as session:
+            cypher = """
+            MATCH (n:Entity)
+            WHERE n.id CONTAINS $kw
+            RETURN DISTINCT n.id AS 实体名称 LIMIT 50
+            """
+            res = session.run(cypher, kw=keyword)
+            records = list(res)
+            data = [rec.data() for rec in records]
+            return pd.DataFrame(data)
+    except Exception:
+        return pd.DataFrame()
+
+# ========= 新增：病症专属模糊查询（模糊病症 + 对应治疗药材）=========
 def fuzzy_disease_with_herb(keyword):
     with driver.session() as session:
         cypher = """
