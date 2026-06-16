@@ -8,14 +8,13 @@ import json
 st.set_page_config(page_title="中医药知识图谱+AI问答", layout="wide")
 st.title("🌿 中医药知识图谱智能系统")
 
-# ---------------------- 1. 数据库连接（修复传参错误） ----------------------
+# ---------------------- 1. 数据库连接 ----------------------
 @st.cache_resource
 def init_driver():
     uri = "neo4j+s://cb5cc04e.databases.neo4j.io"
     user = "cb5cc04e"
     pwd = "uzjqMbskUGdIObBV0uRRs6AoTO8gpmetKkHyhd3vuhs"
-    # 修复：账号密码放入 auth，同时指定默认库
-    return GraphDatabase.driver(uri, auth=(user, pwd), database="neo4j")
+    return GraphDatabase.driver(uri, auth=(user, pwd))
 
 driver = init_driver()
 
@@ -45,7 +44,7 @@ def get_entity_info(entity_name):
         relations = [rec.data() for rec in rel_list]
     return props, relations
 
-# ---------------------- 3. 查询函数 ----------------------
+# ---------------------- 3. 查询函数（区分双向关系） ----------------------
 # 药材 -> 可治疗病症（实体页专用，修复关系方向）
 def query_disease_by_herb(herb_name):
     with driver.session() as session:
@@ -70,26 +69,13 @@ def query_herbs_for_disease(disease_name):
         data = [rec.data() for rec in records]
         return pd.DataFrame(data)
 
-# 全局模糊查询（实体页使用）
+# 新增：全局模糊查询函数（支持药材/病症模糊匹配）
 def fuzzy_search_all(keyword):
     with driver.session() as session:
         cypher = """
         MATCH (n:Entity)
         WHERE n.id CONTAINS $kw
         RETURN DISTINCT n.id AS 实体名称 LIMIT 50
-        """
-        res = session.run(cypher, kw=keyword)
-        records = list(res)
-        data = [rec.data() for rec in records]
-        return pd.DataFrame(data)
-
-# 【新增】病症专用模糊查询：模糊匹配病症 + 关联对应药材
-def fuzzy_disease_with_herb(keyword):
-    with driver.session() as session:
-        cypher = """
-        MATCH (m:Entity)-[r]->(d:Entity)
-        WHERE type(r) = '治疗' AND d.id CONTAINS $kw
-        RETURN DISTINCT d.id AS 病症名称, m.id AS 对应药材 LIMIT 100
         """
         res = session.run(cypher, kw=keyword)
         records = list(res)
@@ -197,10 +183,11 @@ menu = st.sidebar.selectbox(
 # 实体查询页面（移除【该病症对应药材】按钮）
 if menu == "实体查询":
     st.subheader("📌 药材/病症 模板查询 & 模糊检索")
+    # 统一输入框
     input_text = st.text_input("请输入药材/病症名称（支持模糊关键词，例：香、腹痛）", value="丁香")
     st.divider()
 
-    # 两行布局，3列+2列
+    # 两行布局，移除原第六个按钮，保留5个按钮
     col1, col2, col3 = st.columns(3)
     with col1:
         btn_entity_info = st.button("查询实体完整属性")
@@ -216,41 +203,40 @@ if menu == "实体查询":
         btn_clear = st.button("清空结果")
 
     st.divider()
+    # 结果容器
     result_props = None
     result_rels = None
     result_fuzzy = None
-    input_text = input_text.strip()
 
     # 按钮事件逻辑
-    if btn_entity_info and input_text:
+    if btn_entity_info and input_text.strip():
         result_props, _ = get_entity_info(input_text)
-    elif btn_entity_relation and input_text:
+    elif btn_entity_relation and input_text.strip():
         _, result_rels = get_entity_info(input_text)
-    elif btn_drug_treat and input_text:
-        # 调用药材查病症
+    elif btn_drug_treat and input_text.strip():
+        # 调用修复后的药材查病症函数
         result_fuzzy = query_disease_by_herb(input_text)
-    elif btn_fuzzy and input_text:
+    elif btn_fuzzy and input_text.strip():
         result_fuzzy = fuzzy_search_all(input_text)
     elif btn_clear:
         result_props = None
         result_rels = None
         result_fuzzy = None
-        st.info("✅ 已清空结果")
+        st.info("✅ 已清空所有查询结果")
 
-    # 空输入提示
-    if not input_text and (btn_entity_info or btn_entity_relation or btn_fuzzy):
-        st.warning("⚠️ 请先输入查询内容！")
-
-    # 结果展示
+    # ========== 结果展示区 ==========
+    # 1. 实体属性展示
     if result_props is not None:
         st.markdown("### 基本属性")
         st.dataframe(pd.DataFrame(list(result_props.items()), columns=["属性", "值"]), use_container_width=True)
+    # 2. 关联关系展示
     if result_rels is not None:
         st.markdown("### 关联关系")
         if result_rels:
             st.dataframe(pd.DataFrame(result_rels), use_container_width=True)
         else:
             st.info("该实体暂无关联关系")
+    # 3. 模糊查询/病症结果展示
     if result_fuzzy is not None:
         if result_fuzzy.empty:
             st.warning("⚠️ 未查询到相关数据，请更换关键词重试")
@@ -258,7 +244,11 @@ if menu == "实体查询":
             st.success(f"✅ 共查询到 {len(result_fuzzy)} 条结果")
             st.dataframe(result_fuzzy, use_container_width=True)
 
-# 病症找药页面（新增病症专属模糊查询，返回病症+对应药材）
+    # 空输入校验
+    if not input_text.strip() and (btn_entity_info or btn_entity_relation or btn_fuzzy):
+        st.warning("⚠️ 请先输入查询内容！")
+
+# 病症找页面（新增模糊查询按钮）
 elif menu == "病症找药":
     st.subheader("💊 根据病症查询推荐药材")
     disease = st.text_input("输入病症名称（支持模糊关键词，例：肾虚、腹痛）", "肾虚阳痿")
@@ -273,30 +263,29 @@ elif menu == "病症找药":
     if btn_search and disease.strip():
         df_result = query_herbs_for_disease(disease)
     elif btn_fuzzy_dis and disease.strip():
-        # 调用病症专属模糊查询
-        df_result = fuzzy_disease_with_herb(disease)
+        df_result = fuzzy_search_all(disease)
 
     if df_result is not None:
         if df_result.empty:
             st.warning("未找到相关药材")
         else:
-            st.success(f"找到{len(df_result)}条相关数据")
+            st.success(f"找到{len(df_result)}种相关药材")
             st.dataframe(df_result, use_container_width=True)
 
-# AI智能问答页面
+# AI智能问答页面（完全不变）
 elif menu == "🤖 AI智能问答":
-    st.subheader("🤖 中医药AI问答")
+    st.subheader("🤖 AI智能问答")
     st.info("结合知识图谱回答药材、病症相关问题，不编造内容")
     user_question = st.text_area("请输入问题", placeholder="例如：丁香的性味归经是什么？可以治疗哪些病症？", height=100)
     if st.button("开始问答", type="primary") and user_question.strip():
         with st.spinner("正在检索图谱并思考..."):
+            api_key = st.secrets["DASHSCOPE_API_KEY"]
+            graph_ctx = search_graph_context(user_question)
+            with st.expander("📚 知识图谱检索详情", expanded=False):
+                st.write(graph_ctx)
             try:
-                api_key = st.secrets["DASHSCOPE_API_KEY"]
-                graph_ctx = search_graph_context(user_question)
-                with st.expander("📚 知识图谱检索详情", expanded=False):
-                    st.write(graph_ctx)
                 answer = call_tongyi_api(api_key, graph_ctx, user_question)
                 st.markdown("### ✅ AI 回答")
                 st.write(answer)
             except Exception as e:
-                st.error(f"调用接口失败：{str(e)}")
+                st.error(f"调用大模型失败：{str(e)}")
