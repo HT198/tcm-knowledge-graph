@@ -8,13 +8,14 @@ import json
 st.set_page_config(page_title="中医药知识图谱+AI问答", layout="wide")
 st.title("🌿 中医药知识图谱智能系统")
 
-# ---------------------- 1. 数据库连接 ----------------------
+# ---------------------- 1. 数据库连接（修复传参错误） ----------------------
 @st.cache_resource
 def init_driver():
     uri = "neo4j+s://cb5cc04e.databases.neo4j.io"
     user = "cb5cc04e"
     pwd = "uzjqMbskUGdIObBV0uRRs6AoTO8gpmetKkHyhd3vuhs"
-    return GraphDatabase.driver(uri, pwd)
+    # 修复：账号密码放入 auth，同时指定默认库
+    return GraphDatabase.driver(uri, auth=(user, pwd), database="neo4j")
 
 driver = init_driver()
 
@@ -57,7 +58,7 @@ def query_disease_by_herb(herb_name):
         data = [rec.data() for rec in records]
         return pd.DataFrame(data)
 
-# 病症 -> 对应药材（精准查询）
+# 病症 -> 对应药材（病症找药页专用）
 def query_herbs_for_disease(disease_name):
     with driver.session() as session:
         res = session.run("""
@@ -69,7 +70,7 @@ def query_herbs_for_disease(disease_name):
         data = [rec.data() for rec in records]
         return pd.DataFrame(data)
 
-# 全局模糊查询（实体页使用，不变）
+# 全局模糊查询（实体页使用）
 def fuzzy_search_all(keyword):
     with driver.session() as session:
         cypher = """
@@ -133,12 +134,14 @@ def search_graph_context(question):
         question = question.replace(word, "")
     context = []
     with driver.session() as session:
+        # 从问题中提取关键词
         keywords = []
         for token in question.replace("？", "").replace("用什么", "").replace("什么药", "").split():
-            if len(token) > 1:  # 过滤单字虚词
+            if len(token) > 1:  # 过滤掉单字虚词
                 keywords.append(token)
         keywords.append(question)
 
+        # 匹配所有相关实体
         entity_ids = set()
         for kw in keywords:
             res = session.run("""
@@ -153,7 +156,8 @@ def search_graph_context(question):
         if entity_ids:
             context.append(f"✅ 匹配到的实体：{', '.join(entity_ids)}")
 
-            for entity_id in entity_ids[:3]:  # 限制数量，防止上下文过长
+            # 提取实体属性与关系
+            for entity_id in entity_ids[:3]:  # 取前3个，避免上下文过长
                 res = session.run("""
                     MATCH (n:Entity {id: $id}) RETURN n
                 """, id=entity_id)
@@ -171,6 +175,7 @@ def search_graph_context(question):
                     s, r, t = rec.values()
                     context.append(f"🔗 图谱关系：{s} —[{r}]→ {t}")
 
+        # 反向匹配关系
         for kw in keywords:
             res = session.run("""
                 MATCH (s:Entity)-[r]->(t:Entity)
@@ -189,13 +194,13 @@ menu = st.sidebar.selectbox(
     ["实体查询", "病症找药", "🤖 AI智能问答"]
 )
 
-# ========== 实体查询页面（完全不变） ==========
+# 实体查询页面（移除【该病症对应药材】按钮）
 if menu == "实体查询":
     st.subheader("📌 药材/病症 模板查询 & 模糊检索")
     input_text = st.text_input("请输入药材/病症名称（支持模糊关键词，例：香、腹痛）", value="丁香")
     st.divider()
 
-    # 按钮布局：3列 + 2列
+    # 两行布局，3列+2列
     col1, col2, col3 = st.columns(3)
     with col1:
         btn_entity_info = st.button("查询实体完整属性")
@@ -222,6 +227,7 @@ if menu == "实体查询":
     elif btn_entity_relation and input_text:
         _, result_rels = get_entity_info(input_text)
     elif btn_drug_treat and input_text:
+        # 调用药材查病症
         result_fuzzy = query_disease_by_herb(input_text)
     elif btn_fuzzy and input_text:
         result_fuzzy = fuzzy_search_all(input_text)
@@ -230,6 +236,10 @@ if menu == "实体查询":
         result_rels = None
         result_fuzzy = None
         st.info("✅ 已清空结果")
+
+    # 空输入提示
+    if not input_text and (btn_entity_info or btn_entity_relation or btn_fuzzy):
+        st.warning("⚠️ 请先输入查询内容！")
 
     # 结果展示
     if result_props is not None:
@@ -248,11 +258,7 @@ if menu == "实体查询":
             st.success(f"✅ 共查询到 {len(result_fuzzy)} 条结果")
             st.dataframe(result_fuzzy, use_container_width=True)
 
-    # 空输入提示
-    if not input_text and (btn_entity_info or btn_entity_relation or btn_fuzzy):
-        st.warning("⚠️ 请先输入查询内容！")
-
-# ========== 病症找药页面（仅修改模糊查询调用函数） ==========
+# 病症找药页面（新增病症专属模糊查询，返回病症+对应药材）
 elif menu == "病症找药":
     st.subheader("💊 根据病症查询推荐药材")
     disease = st.text_input("输入病症名称（支持模糊关键词，例：肾虚、腹痛）", "肾虚阳痿")
@@ -265,20 +271,19 @@ elif menu == "病症找药":
 
     df_result = None
     if btn_search and disease.strip():
-        # 精准查询：原有逻辑不变
         df_result = query_herbs_for_disease(disease)
     elif btn_fuzzy_dis and disease.strip():
-        # 模糊检索：调用新函数，匹配相似病症 + 对应药材
+        # 调用病症专属模糊查询
         df_result = fuzzy_disease_with_herb(disease)
 
     if df_result is not None:
         if df_result.empty:
             st.warning("未找到相关药材")
         else:
-            st.success(f"找到{len(df_result)}条病症-药材对应数据")
+            st.success(f"找到{len(df_result)}条相关数据")
             st.dataframe(df_result, use_container_width=True)
 
-# ========== AI智能问答页面（完全不变） ==========
+# AI智能问答页面
 elif menu == "🤖 AI智能问答":
     st.subheader("🤖 中医药AI问答")
     st.info("结合知识图谱回答药材、病症相关问题，不编造内容")
