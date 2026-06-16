@@ -70,12 +70,12 @@ def query_herbs_for_disease(disease_name):
         return pd.DataFrame(data)
 
 # 新增：全局模糊查询函数（支持药材/病症模糊匹配）
-def fuzzy_search_all(keyword):
+def fuzzy_disease_with_herb(keyword):
     with driver.session() as session:
         cypher = """
-        MATCH (n:Entity)
-        WHERE n.id CONTAINS $kw
-        RETURN DISTINCT n.id AS 实体名称 LIMIT 50
+        MATCH (m:Entity)-[r]->(d:Entity)
+        WHERE type(r) = '治疗' AND d.id CONTAINS $kw
+        RETURN DISTINCT d.id AS 病症名称, m.id AS 对应药材 LIMIT 100
         """
         res = session.run(cypher, kw=keyword)
         records = list(res)
@@ -263,7 +263,7 @@ elif menu == "病症找药":
     if btn_search and disease.strip():
         df_result = query_herbs_for_disease(disease)
     elif btn_fuzzy_dis and disease.strip():
-        df_result = fuzzy_search_all(disease)
+        df_result = fuzzy_disease_with_herb(disease)
 
     if df_result is not None:
         if df_result.empty:
