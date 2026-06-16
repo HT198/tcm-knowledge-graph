@@ -5,35 +5,22 @@ import requests
 import json
 
 # 页面配置
-st.set_page_config(page_title="中医药知识图谱", layout="wide")
+st.set_page_config(page_title="中医药知识图谱+AI问答", layout="wide")
 st.title("🌿 中医药知识图谱智能系统")
 
 # ---------------------- 1. 数据库连接 ----------------------
-# ---------------------- 新版云端适配数据库连接（修复路由参数冲突） ----------------------
-def get_db_session():
-    """适配Streamlit Cloud + Neo4j Aura，解决参数冲突与连接问题"""
-    try:
-        uri = "neo4j://cb5cc04e.databases.neo4j.io"
-        user = "cb5cc04e"
-        pwd = "uzjqMbskUGdIObBV0uRRs6AoTO8gpmetKkHyhd3vuhs"
+@st.cache_resource
+def init_driver():
+    uri = "neo4j+s://cb5cc04e.databases.neo4j.io"
+    user = "cb5cc04e"
+    pwd = "uzjqMbskUGdIObBV0uRRs6AoTO8gpmetKkHyhd3vuhs"
+    return GraphDatabase.driver(uri, auth=(user, pwd))
 
-        # 移除 routing_context，彻底解决参数重复报错
-        driver = GraphDatabase.driver(
-            uri,
-            auth=(user, pwd),
-            database="neo4j",       # Aura 必须指定默认库
-            connection_timeout=20,  # 延长云端超时
-            max_connection_lifetime=300
-        )
-        return driver.session()
-    except Exception as e:
-        st.error(f"数据库连接失败：{str(e)}")
-        return None
+driver = init_driver()
 
 # ---------------------- 2. 修复后的实体查询函数（正确显示属性） ----------------------
 def get_entity_info(entity_name):
-    session = get_db_session()
-    try:
+    with driver.session() as session:
         res = session.run("""
             MATCH (n:Entity {id: $name}) RETURN n
         """, name=entity_name)
@@ -42,25 +29,24 @@ def get_entity_info(entity_name):
             return None, None
         
         node = records[0]["n"]
+        # 核心修复：过滤掉空值，只保留有数据的属性，不会再显示 None
         props = {}
         for key, val in dict(node).items():
             if val is not None and val != "":
                 props[key] = val
 
+        # 查询关联关系
         res_rel = session.run("""
             MATCH (n:Entity {id: $name})-[r]-(m)
             RETURN type(r) AS 关系类型, m.id AS 关联实体
         """, name=entity_name)
         rel_list = list(res_rel)
         relations = [rec.data() for rec in rel_list]
-        return props, relations
-    finally:
-        session.close()
+    return props, relations
 
 # ---------------------- 3. 原有病症查询函数（不变） ----------------------
 def query_herbs_for_disease(disease_name):
-    session = get_db_session()
-    try:
+    with driver.session() as session:
         res = session.run("""
             MATCH (m:Entity)-[r]->(d:Entity {id: $disease})
             WHERE type(r) = '治疗'
@@ -69,23 +55,6 @@ def query_herbs_for_disease(disease_name):
         records = list(res)
         data = [rec.data() for rec in records]
         return pd.DataFrame(data)
-    finally:
-        session.close()
-
-def fuzzy_search_all(keyword):
-    session = get_db_session()
-    try:
-        cypher = """
-        MATCH (n:Entity)
-        WHERE n.id CONTAINS $kw
-        RETURN DISTINCT n.id AS 实体名称 LIMIT 50
-        """
-        res = session.run(cypher, kw=keyword)
-        records = list(res)
-        data = [rec.data() for rec in records]
-        return pd.DataFrame(data)
-    finally:
-        session.close()
 
 # ---------------------- 4. 大模型调用函数（新增，不影响原有功能） ----------------------
 def call_tongyi_api(api_key, graph_context, user_question):
@@ -124,16 +93,20 @@ def search_graph_context(question):
     for word in stop_words:
         question = question.replace(word, "")
     context = []
-    session = get_db_session()
-    try:
+    with driver.session() as session:
+        # ---------------------- 1. 从问题中提取关键词（简单分词） ----------------------
         keywords = []
-        for token in question.replace("？", "").split():
-            if len(token) > 1:
+        # 把问题按空格/标点拆分，提取有意义的词
+        for token in question.replace("？", "").replace("用什么", "").replace("什么药", "").split():
+            if len(token) > 1:  # 过滤掉单字虚词
                 keywords.append(token)
+        # 加上原问题文本，兜底匹配
         keywords.append(question)
 
+        # ---------------------- 2. 匹配所有相关实体（含模糊匹配） ----------------------
         entity_ids = set()
         for kw in keywords:
+            # 优先精准匹配，再模糊匹配
             res = session.run("""
                 MATCH (n:Entity)
                 WHERE n.id = $kw OR n.id CONTAINS $kw
@@ -145,7 +118,10 @@ def search_graph_context(question):
         entity_ids = list(entity_ids)
         if entity_ids:
             context.append(f"✅ 匹配到的实体：{', '.join(entity_ids)}")
-            for entity_id in entity_ids[:3]:
+
+            # ---------------------- 3. 对每个实体，拉取【属性】和【所有进出关系】 ----------------------
+            for entity_id in entity_ids[:3]:  # 取前3个，避免上下文过长
+                # 3.1 提取实体属性
                 res = session.run("""
                     MATCH (n:Entity {id: $id}) RETURN n
                 """, id=entity_id)
@@ -154,6 +130,7 @@ def search_graph_context(question):
                 if props_str:
                     context.append(f"📋 {entity_id} 属性：{props_str}")
 
+                # 3.2 提取所有关系（不管方向、不管关系名）
                 res_rel = session.run("""
                     MATCH (a:Entity)-[r]-(b:Entity)
                     WHERE a.id = $id OR b.id = $id
@@ -163,6 +140,7 @@ def search_graph_context(question):
                     s, r, t = rec.values()
                     context.append(f"🔗 图谱关系：{s} —[{r}]→ {t}")
 
+        # ---------------------- 4. 反向兜底：匹配所有包含关键词的关系 ----------------------
         for kw in keywords:
             res = session.run("""
                 MATCH (s:Entity)-[r]->(t:Entity)
@@ -172,8 +150,7 @@ def search_graph_context(question):
             for rec in res:
                 s, r, t = rec.values()
                 context.append(f"🔍 关联关系：{s} —[{r}]→ {t}")
-    finally:
-        session.close()
+
     return "\n".join(context) if context else "知识图谱中未查询到相关信息"
 
 # ---------------------- 6. 页面菜单 ----------------------
@@ -184,74 +161,21 @@ menu = st.sidebar.selectbox(
 
 # 实体查询页面（修复后）
 if menu == "实体查询":
-    st.subheader("📌 药材/病症 模板查询 & 模糊检索")
-    # 统一输入框
-    input_text = st.text_input("请输入药材/病症名称（支持模糊关键词，例：香、腹痛）", value="丁香")
-    st.divider()
-
-    # ========== 两行三列 功能按钮组 ==========
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        btn_entity_info = st.button("查询实体完整属性")
-    with col2:
-        btn_entity_relation = st.button("查询实体关联关系")
-    with col3:
-        btn_drug_treat = st.button("该药材可治病症")
-
-    col4, col5, col6 = st.columns(3)
-    with col4:
-        btn_disease_drug = st.button("该病症对应药材")
-    with col5:
-        btn_fuzzy = st.button("🔍 全局模糊检索")
-    with col6:
-        btn_clear = st.button("清空结果")
-
-    st.divider()
-    # 结果容器
-    result_props = None
-    result_rels = None
-    result_fuzzy = None
-
-    # 按钮事件逻辑
-    if btn_entity_info and input_text.strip():
-        result_props, _ = get_entity_info(input_text)
-    elif btn_entity_relation and input_text.strip():
-        _, result_rels = get_entity_info(input_text)
-    elif btn_drug_treat and input_text.strip():
-        result_fuzzy = query_herbs_for_disease(input_text)
-    elif btn_disease_drug and input_text.strip():
-        result_fuzzy = query_herbs_for_disease(input_text)
-    elif btn_fuzzy and input_text.strip():
-        result_fuzzy = fuzzy_search_all(input_text)
-    elif btn_clear:
-        result_props = None
-        result_rels = None
-        result_fuzzy = None
-        st.info("✅ 已清空所有查询结果")
-
-    # ========== 结果展示区 ==========
-    # 1. 实体属性展示
-    if result_props is not None:
-        st.markdown("### 基本属性")
-        st.dataframe(pd.DataFrame(list(result_props.items()), columns=["属性", "值"]), use_container_width=True)
-    # 2. 关联关系展示
-    if result_rels is not None:
-        st.markdown("### 关联关系")
-        if result_rels:
-            st.dataframe(pd.DataFrame(result_rels), use_container_width=True)
+    st.subheader("📌 药材/实体查询")
+    entity_name = st.text_input("输入实体名称（如：丁香）", "丁香")
+    if st.button("查询"):
+        props, relations = get_entity_info(entity_name)
+        if props is None:
+            st.warning("未找到该实体，请检查名称是否正确")
         else:
-            st.info("该实体暂无关联关系")
-    # 3. 模糊查询/病症找药结果展示
-    if result_fuzzy is not None:
-        if result_fuzzy.empty:
-            st.warning("⚠️ 未查询到相关数据，请更换关键词重试")
-        else:
-            st.success(f"✅ 共查询到 {len(result_fuzzy)} 条结果")
-            st.dataframe(result_fuzzy, use_container_width=True)
-
-    # 空输入校验
-    if not input_text.strip() and (btn_entity_info or btn_entity_relation or btn_fuzzy):
-        st.warning("⚠️ 请先输入查询内容！")
+            st.markdown("### 基本属性")
+            # 只显示有数据的属性，不会再出现 None
+            st.dataframe(pd.DataFrame(list(props.items()), columns=["属性", "值"]), use_container_width=True)
+            if relations:
+                st.markdown("### 关联关系")
+                st.dataframe(pd.DataFrame(relations), use_container_width=True)
+            else:
+                st.info("该实体暂无关联关系")
 
 # 病症找药页面（不变）
 elif menu == "病症找药":
