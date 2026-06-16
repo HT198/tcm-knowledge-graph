@@ -9,18 +9,27 @@ st.set_page_config(page_title="中医药知识图谱+AI问答", layout="wide")
 st.title("🌿 中医药知识图谱智能系统")
 
 # ---------------------- 1. 数据库连接 ----------------------
-@st.cache_resource
-def init_driver():
-    uri = "neo4j+s://cb5cc04e.databases.neo4j.io"
+def get_db_session():
+    """适配Streamlit Cloud + Neo4j Aura，解决DNS解析/断连问题"""
+    # 协议改为 neo4j:// 直连，规避+s路由DNS解析失败
+    uri = "neo4j://cb5cc04e.databases.neo4j.io"
     user = "cb5cc04e"
     pwd = "uzjqMbskUGdIObBV0uRRs6AoTO8gpmetKkHyhd3vuhs"
-    return GraphDatabase.driver(uri, auth=(user, pwd))
 
-driver = init_driver()
+    driver = GraphDatabase.driver(
+        uri,
+        auth=(user, pwd),
+        database="neo4j",          # Aura 强制指定默认数据库
+        connection_timeout=20,     # 延长云端网络超时时间
+        max_connection_lifetime=300,
+        routing_context={"routing.enabled": False}  # 关闭路由，彻底解决DNS报错
+    )
+    return driver.session()
 
 # ---------------------- 2. 修复后的实体查询函数（正确显示属性） ----------------------
 def get_entity_info(entity_name):
-    with driver.session() as session:
+    session = get_db_session()
+    try:
         res = session.run("""
             MATCH (n:Entity {id: $name}) RETURN n
         """, name=entity_name)
@@ -29,24 +38,25 @@ def get_entity_info(entity_name):
             return None, None
         
         node = records[0]["n"]
-        # 核心修复：过滤掉空值，只保留有数据的属性，不会再显示 None
         props = {}
         for key, val in dict(node).items():
             if val is not None and val != "":
                 props[key] = val
 
-        # 查询关联关系
         res_rel = session.run("""
             MATCH (n:Entity {id: $name})-[r]-(m)
             RETURN type(r) AS 关系类型, m.id AS 关联实体
         """, name=entity_name)
         rel_list = list(res_rel)
         relations = [rec.data() for rec in rel_list]
-    return props, relations
+        return props, relations
+    finally:
+        session.close()
 
 # ---------------------- 3. 原有病症查询函数（不变） ----------------------
 def query_herbs_for_disease(disease_name):
-    with driver.session() as session:
+    session = get_db_session()
+    try:
         res = session.run("""
             MATCH (m:Entity)-[r]->(d:Entity {id: $disease})
             WHERE type(r) = '治疗'
@@ -55,9 +65,12 @@ def query_herbs_for_disease(disease_name):
         records = list(res)
         data = [rec.data() for rec in records]
         return pd.DataFrame(data)
+    finally:
+        session.close()
 
 def fuzzy_search_all(keyword):
-    with driver.session() as session:
+    session = get_db_session()
+    try:
         cypher = """
         MATCH (n:Entity)
         WHERE n.id CONTAINS $kw
@@ -67,6 +80,8 @@ def fuzzy_search_all(keyword):
         records = list(res)
         data = [rec.data() for rec in records]
         return pd.DataFrame(data)
+    finally:
+        session.close()
 
 # ---------------------- 4. 大模型调用函数（新增，不影响原有功能） ----------------------
 def call_tongyi_api(api_key, graph_context, user_question):
@@ -105,20 +120,16 @@ def search_graph_context(question):
     for word in stop_words:
         question = question.replace(word, "")
     context = []
-    with driver.session() as session:
-        # ---------------------- 1. 从问题中提取关键词（简单分词） ----------------------
+    session = get_db_session()
+    try:
         keywords = []
-        # 把问题按空格/标点拆分，提取有意义的词
-        for token in question.replace("？", "").replace("用什么", "").replace("什么药", "").split():
-            if len(token) > 1:  # 过滤掉单字虚词
+        for token in question.replace("？", "").split():
+            if len(token) > 1:
                 keywords.append(token)
-        # 加上原问题文本，兜底匹配
         keywords.append(question)
 
-        # ---------------------- 2. 匹配所有相关实体（含模糊匹配） ----------------------
         entity_ids = set()
         for kw in keywords:
-            # 优先精准匹配，再模糊匹配
             res = session.run("""
                 MATCH (n:Entity)
                 WHERE n.id = $kw OR n.id CONTAINS $kw
@@ -130,10 +141,7 @@ def search_graph_context(question):
         entity_ids = list(entity_ids)
         if entity_ids:
             context.append(f"✅ 匹配到的实体：{', '.join(entity_ids)}")
-
-            # ---------------------- 3. 对每个实体，拉取【属性】和【所有进出关系】 ----------------------
-            for entity_id in entity_ids[:3]:  # 取前3个，避免上下文过长
-                # 3.1 提取实体属性
+            for entity_id in entity_ids[:3]:
                 res = session.run("""
                     MATCH (n:Entity {id: $id}) RETURN n
                 """, id=entity_id)
@@ -142,7 +150,6 @@ def search_graph_context(question):
                 if props_str:
                     context.append(f"📋 {entity_id} 属性：{props_str}")
 
-                # 3.2 提取所有关系（不管方向、不管关系名）
                 res_rel = session.run("""
                     MATCH (a:Entity)-[r]-(b:Entity)
                     WHERE a.id = $id OR b.id = $id
@@ -152,7 +159,6 @@ def search_graph_context(question):
                     s, r, t = rec.values()
                     context.append(f"🔗 图谱关系：{s} —[{r}]→ {t}")
 
-        # ---------------------- 4. 反向兜底：匹配所有包含关键词的关系 ----------------------
         for kw in keywords:
             res = session.run("""
                 MATCH (s:Entity)-[r]->(t:Entity)
@@ -162,7 +168,8 @@ def search_graph_context(question):
             for rec in res:
                 s, r, t = rec.values()
                 context.append(f"🔍 关联关系：{s} —[{r}]→ {t}")
-
+    finally:
+        session.close()
     return "\n".join(context) if context else "知识图谱中未查询到相关信息"
 
 # ---------------------- 6. 页面菜单 ----------------------
